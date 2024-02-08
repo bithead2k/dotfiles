@@ -16,3 +16,12 @@ sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply bithead2k
 
 ```
 
+Basic operation:
+```
+chezmoi add $file
+chezmoi cd
+git add $file
+git commit -m "I added file: $file"
+git push
+exit
+```
