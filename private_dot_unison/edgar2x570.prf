@@ -1,0 +1,4 @@
+root=/home/kirk/
+root=ssh://kroybal@kroybal-x570-aorus-master//home/kroybal
+
+include common

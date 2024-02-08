@@ -1,0 +1,4 @@
+root = /home/kroybal/
+root = ssh://kirk@kroybal-edgar.local//home/kirk/
+
+include common
