@@ -8,8 +8,11 @@ Various configuration files, bash aliases, git integrations, vim setup, etc.
 Install it on a new machine with:
 
 ```bash
-# This line is really here so I can copy/paste.
+# These lines are really here so I can copy/paste.
+
+sh -c "$(curl -fsLS get.chzmoi.io/lb)"
 
 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply bithead2k
+
 ```
 
