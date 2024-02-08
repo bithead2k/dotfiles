@@ -1,0 +1,7 @@
+\set QUIET 1
+\pset pager off
+\set VISUAL vim
+\set apphostname `echo -n "'"; hostname -I | sed 's/ .*$//'; echo -n "'"`
+SET application_name = :apphostname;
+SELECT txid FROM txid_current() txid \gset
+\set PROMPT1 '[38;5;250m[48;5;240m %n[%~:%>]%x %:txid: [48;5;238m[38;5;240m[38;5;250m[48;5;238m %M [48;5;31m[38;5;238m[38;5;15m[48;5;31m %p [48;5;236m[38;5;31m[38;5;15m[48;5;236m %:ROW_COUNT: [0m[38;5;236m[0m %# '
