@@ -1,0 +1,120 @@
+set ru
+set nu
+set expandtab
+set tabstop=4
+set shiftwidth=4
+set smarttab
+set cursorline
+set guifont=Monospace\ 18
+set relativenumber
+set textwidth=80
+set rtp+=/usr/local/opt/fzf
+set showcmd
+
+colorscheme elflord
+iabbrev PGS PostgreSQL
+iabbrev pgs PostgreSQL
+iabbrev KLR Kirk L. Roybal
+iabbrev klr Kirk L. Roybal
+iabbrev Robyal Roybal
+iabbrev Krik Kirk
+iabbrev Kikr Kirk
+iabbrev roybal Roybal
+iabbrev kirk Kirk
+iabbrev postgresql PostgreSQL
+iabbrev Postgresql PostgreSQL
+iabbrev PostgreSql PostgreSQL
+iabbrev 2Q 2ndQuadrant
+iabbrev 2q 2ndQuadrant
+iabbrev pico Principal Consultant
+iabbrev ```{. ```{.sqlpostgresql}
+iabbrev tsl Timescale
+
+" ok this is going to get ridiculous
+source ~/.vimspellrc
+source ~/.vimmarkdownpreviewrc
+
+" execute pathogen#infect()
+filetype plugin indent on
+syntax on
+let g:filestyle_ignore_patterns = ['^\t* \{1,3}\S']
+let g:sql_type_default = 'pgsql'
+let g:pgsql_pl = ['r', 'python']
+let g:dbext_default_profile_pglocal = 'type=PGSQL:user=kroybal:host=localhost'
+let g:dbext_default_PGSQL_cmd_options = ''
+augroup local
+    au!
+    autocmd BufRead */work/sql/* DBSetOption profile=pglocal
+augroup end
+nmap <leader>l :set list!<CR>
+if has("autocmd")
+  autocmd bufwritepost .vimrc source $MYVIMRC
+endif
+nmap <leader>v :tabedit $MYVIMRC<CR>
+nmap <leader>` ysiw`l
+nmap <leader>' ysiw'l
+nmap <leader>" ysiw"l
+nmap <leader>* ysiw*lll
+nmap <leader>~ ysiw~lll
+nmap <leader>= ysiw=lll
+nmap <leader>a ä
+nmap <leader>o ö
+nmap <leader>u ü
+nmap <leader>s ß
+nmap <leader>A Ä
+nmap <leader>O Ö
+nmap <leader>U Ü
+
+source $VIMRUNTIME/mswin.vim
+behave mswin
+
+" air-line
+let g:airline_theme='atomic'
+let g:airline_powerline_fonts = 1
+let vim_markdown_preview_browser='Brave'
+let vim_markdown_preview_temp_file=1
+let vim_markdown_preview_github=0
+let vim_markdown_preview_pandoc=1
+
+if !exists('g:airline_symbols')
+    let g:airline_symbols = {}
+endif
+
+set statusline+=%#warningmsg#
+set statusline+=%{SyntasticStatuslineFlag()}
+set statusline+=%*
+
+let g:syntastic_always_populate_loc_list = 1
+let g:syntastic_auto_loc_list = 1
+let g:syntastic_check_on_open = 1
+let g:syntastic_check_on_wq = 0
+let g:syntastic_quiet_messages = { 'regex': ['MD013', 'MD031'] }
+
+" unicode symbols
+let g:airline_left_sep = '»'
+let g:airline_left_sep = '▶'
+let g:airline_right_sep = '«'
+let g:airline_right_sep = '◀'
+let g:airline_symbols.linenr = '␊'
+let g:airline_symbols.linenr = '␤'
+let g:airline_symbols.linenr = '¶'
+let g:airline_symbols.branch = '⎇'
+let g:airline_symbols.paste = 'ρ'
+let g:airline_symbols.paste = 'Þ'
+let g:airline_symbols.paste = '∥'
+let g:airline_symbols.whitespace = 'Ξ'
+
+" airline symbols
+let g:airline_left_sep = ''
+let g:airline_left_alt_sep = ''
+let g:airline_right_sep = ''
+let g:airline_right_alt_sep = ''
+let g:airline_symbols.branch = ''
+let g:airline_symbols.readonly = ''
+let g:airline_symbols.linenr = ''
+" let g:table_mode_corner_corner='|'
+" let g:table_mode_header_fillchar='-'
+
+" set guifont=DejaVuSansMonoPowerline:h26
+" au BufRead,BufNewFile *.md MarkdownPreview
+" au BufRead,BufNewFile *.markdown MarkdownPreview
