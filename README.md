@@ -10,7 +10,7 @@ Install it on a new machine with:
 ```bash
 # These lines are really here so I can copy/paste.
 
-sh -c "$(curl -fsLS get.chzmoi.io/lb)"
+sh -c "$(curl -fsLS get.chezmoi.io/lb)"
 
 sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply bithead2k
 
