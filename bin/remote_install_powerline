@@ -1,0 +1,54 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  remote_install_powerline
+# 
+#         USAGE:  ./remote_install_powerline 
+# 
+#   DESCRIPTION:  
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/19/2024 01:12:26 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+piver=$(ssh $1 'python -V | sed -e "s/.* //" -e "s/\(.*\.\).*/\1/" -e "s/\.$//"')
+
+cat <<-EOF | ssh $1
+# clone
+
+git clone https://github.com/powerline/fonts.git --depth=1
+# install
+cd fonts
+./install.sh
+# clean-up a bit
+cd ..
+rm -rf fonts
+python -m pip install --user powerline-shell
+python -m pip install --user powerline-status
+python -m pip install --user powerline-gitstatus
+echo "export POWERLINE_BASH_CONTINUATION=1
+export POWERLINE_BASH_SELECT=1
+powerline-daemon -q
+. ~/.local/lib/python${piver}/site-packages/powerline/bindings/bash/powerline.sh
+if [ -f ~/.bash_aliases ]
+then
+    source ~/.bash_aliases
+fi" >> ~/.bashrc
+EOF
+
+scp ~/.bash_aliases $1:~
+scp ~/.vimrc $1:~
+scp ~/.vimspellrc $1:~
+scp ~/.inputrc $1:~
+scp ~/.psqlrc $1:~
+ssh $1 'mkdir -p ~/.config/powerline'
+scp -r ~/.config/powerline/* $1:~/.config/powerline/
+scp ~/.ssh/config $1:~/.ssh/
+scp ~/.ssh/webfinish* $1:~/.ssh/

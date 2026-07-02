@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+#===============================================================================
+#
+#          FILE: handout
+# 
+#         USAGE: ./handout [course name]
+# 
+#         e.g.   ./handout "Immersion Gianni"
+#
+#   DESCRIPTION: Create 6-up pdf handout books
+#       from a course definition file
+#
+#       OPTIONS: optional course name default "course".  Must have "course name.conf" file.
+#  REQUIREMENTS: course configuration file: i.e. course.conf
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 08/03/2017 08:41
+#      REVISION:  ---
+#       OUTPUTS: "(Course Name)_numbered_day_N.tex" for each day of input
+#                "(Course Name).htm"   -- html course layout
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+ScriptVersion="1.0"
+course="course"
+
+function die() {
+	echo -e "$@"
+	exit 1
+}
+
+function lower() {
+    echo "$@" | tr '[:upper:]' '[:lower:]'
+}
+
+function deserialize_course() {
+# read course definition file
+
+#  course definition file looks like:
+#
+#  Immersion Gianni.conf
+# course_days=5
+# course_name="Custom Curricuulum"
+# day=()
+# day+=(100PostgreSQL_Intro,120DatabaseAdministration,130UserAdministration,135DCL,140UserDataObjects,110ServerConfig)
+# day+=(170Monitoring,180VacuumFreeze,190Maintenance,200ServerArch_and_Tuning)
+# day+=(200ServerArch_and_Tuning,280Indexes,310ReplicationOverview,320ReplicationTerminology,330ReplicationTransport,340ReplicationStartupSetup,350ReplicationDisconnectionReconnection,360ReplicationSwitchover,370PhysicalStreamingReplication)
+# day+=(460PhysicalBackup,470PointInTimeRecovery,480Barman,300LogicalBackup)
+# day+=(420LogicalDecoding,370LogicalStreamingReplication,410BDR,430OnlineUpgrade)
+
+classfile="${1:-course.conf}"
+[[ -f "$classfile" ]] || return 1
+source "$classfile"
+# IFS=$'\n'
+#for line in $(<"$classfile")
+#do
+#eval "$line"
+#done
+}
+
+
+function make_6up_tex_1 () {
+texname="${1// /_}.tex"
+#remove spaces
+classes=${2// /}
+#split to array
+classes=(${classes//,/ })
+classes=$(printf "}\n\SL{%s" "${classes[@]}")
+classes="${classes:1}}"
+
+cat <<EOF > "${texname}"
+\documentclass[letterpaper]{article}
+\usepackage{pdfpages,fancyhdr,geometry,txfonts}
+\geometry{hdivide={1cm,*,1cm},vdivide={2cm,*,2cm},nohead,footskip=8mm}
+\fancyhead{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\rfoot{\textsf{\thepage}}
+\newcommand{\SL}[1]{\includepdf[nup=1x1, pages=-, scale=1.0,
+  pagecommand=\thispagestyle{fancy}]{#1-6s.pdf}}
+\begin{document}
+%\includepdf[nup=1x1, pages=-, scale=1.0,
+%  pagecommand=\thispagestyle{fancy}]{day-1}
+$classes
+\end{document}
+EOF
+
+}
+
+function make_6up_tex_n() {
+#remove spaces
+classes=${3// /}
+#split to array
+classes=(${classes//,/ })
+classes=$(printf "}\n\SL{%s" "${classes[@]}")
+classes="${classes:1}}"
+cat <<EOF > "${1/ /_}.tex"
+\documentclass[letterpaper]{article}
+\usepackage{pdfpages,fancyhdr,geometry,txfonts}
+\geometry{hdivide={1cm,*,1cm},vdivide={2cm,*,2cm},nohead,footskip=8mm}
+\fancyhead{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\rfoot{\textsf{\thepage}}
+\newcommand{\SL}[2][-]{\includepdf[nup=1x1, pages=#1, scale=1.0,
+  pagecommand=\thispagestyle{fancy}]{#2-6s.pdf}}
+\begin{document}
+\setcounter{page}{$2}
+$classes
+\end{document}
+EOF
+
+}
+
+function make_tex6() {
+pages=1
+for (( i=0;i<course_days; i++ ))
+do
+  (( j = i+1 ))
+  case $i in
+	0) make_6up_tex_1 "${1// /_}_numbered_day_1" "${day[$i]}";;
+	*) make_6up_tex_n "${1// /_}_numbered_day_$j" $pages "${day[$i]}";;
+  esac
+
+  timeout 5 pdflatex "${1// /_}_numbered_day_$j.tex" > /dev/null
+  [[ $? -ne 0 ]] && die "Failed to execute: \"pdflatex ${1// /_}_numbered_day_$j.tex\""
+
+  thisone=$(pdftk "${1// /_}_numbered_day_${j}.pdf" data_dump | grep NumberOfPages | sed 's/^.*: //')
+  (( pages += thisone ))
+
+done
+}
+
+make_htm() {
+cat <<EOF > "$1.htm"
+<html>
+<head>
+<title>Class Syllabus for $1</title>
+</head>
+<body>
+<h1>Class Syllabus for $1</h1>
+
+<table style="font-family: Trebuchet MS,Arial,Helvetica,sans-serif; width: 100%; border-collapse: collapse; margin-bottom: 12px; border-spacing: 0px; box-sizing: border-box;" >
+  <tr style="font-size: 1.4em; text-align: left; background-color: #A7C942; color: #FFFFFF; border: 1px solid #98BF21; ">
+    <th align="center">number</th>
+    <th align="center">class</th>
+    <th align="center">description</th>
+    <th align="center">slides</th>
+  </tr>
+EOF
+
+for (( i=0; i<course_days;i++ ))
+do
+  (( j=i+1 ))
+  #remove spaces
+  classes=${day[${i}]// /}
+  #split to array
+  classes=(${classes//,/ })
+
+  #Header for the day
+  color="#e0e02c"
+  cat <<EOF >> "$1.htm"
+  <tr style="background-color: $color;">
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="center" colspan=4>Day $j</td>
+  </tr>
+EOF
+  flag=0
+  for class in "${classes[@]}"
+  do
+
+  slide_count=$(pdftk $class-1s.pdf data_dump | grep NumberOfPages | sed 's/^.*: //')
+  (( slide_count -= 2 ))  #lead and tail slides are title and Questions?
+  [[ $class == "Break" ]] && slide_count=
+  [[ $class == "Lunch" ]] && slide_count=
+  flag=$((1-flag))
+  case $flag in
+    0) color="#EAF2D3" ;;
+    1) color="#FFFFFF" ;;
+  esac
+  class_pretty=$(echo "$class" | sed -e 's/^[[:digit:]]*//' | sed -r 's/([a-z0-9])([A-Z])/\1 \2/g' | sed 's/_/ /g')
+  course_number=$(echo "$class" | sed -r 's/(^[[:digit:]]*).*/\1/')
+  [[ -f "$class_pretty.desc" ]] && class_desc=$(sed -n '1p' "$class_pretty.desc") || {
+	class_desc=""
+	touch "$class_pretty.desc"
+  }
+  case "$class_pretty" in
+       "Break" | "Lunch" ) 
+       cat <<EOF >> "$1.htm"
+  <tr style="background-color: $color;">
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="left" colspan=4>${class_pretty}</td>
+  </tr>
+EOF
+        ;;
+	*)
+       desc_size=$(cat "$class_pretty.desc" | wc -l)
+       [[ $desc_size -gt 1 ]] && class_pretty=$(sed -n '2p' "$class_pretty.desc")
+       cat <<EOF >> "$1.htm"
+  <tr style="background-color: $color;">
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="right">${course_number}</td>
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="left">${class_pretty}</td>
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="left">${class_desc}</td>
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="right">${slide_count}</td>
+  </tr>
+EOF
+    ;;
+   esac
+
+  done
+
+done
+
+cat <<EOF >> "$1.htm"
+</table>
+</body>
+</html>
+EOF
+
+}
+
+function make_accelo() {
+
+cat <<EOF
+<html>
+<head>
+<title>Class Syllabus for $1</title>
+</head>
+<body>
+<h1>Class Syllabus for $1</h1>
+
+EOF
+
+
+for (( i=0; i<course_days;i++ ))
+do
+  (( j=i+1 ))
+  #remove spaces
+  classes=${day[${i}]// /}
+  #split to array
+  classes=(${classes//,/ })
+
+  #Header for the day
+  header="$course_name: Day $j"
+  header_length=$(echo -n "$header" | wc -c)
+  cat <<EOF
+    </br>$header </br>
+<table style="font-family: Trebuchet MS,Arial,Helvetica,sans-serif; width: 100%; border-collapse: collapse; margin-bottom: 12px; border-spacing: 0px; box-sizing: border-box;" >
+  <tr style="font-size: 1.4em; text-align: left; background-color: #A7C942; color: #FFFFFF; border: 1px solid #98BF21; ">
+    <th align="center">number</th>
+    <th align="center">class</th>
+    <th align="center">description</th>
+  </tr>
+EOF
+  for class in "${classes[@]}"
+  do
+    class_desc=''
+    class_pretty=$(echo "$class" | sed -e 's/^[[:digit:]]*//' | sed -r 's/([a-z0-9])([A-Z])/\1 \2/g' | sed 's/_/ /g')
+    course_number=$(echo "$class" | sed -r 's/(^[[:digit:]]*).*/\1/')
+    [[ -f "$class_pretty.desc" ]] && class_desc=$(sed -n '1p' "$class_pretty.desc") || {
+      class_desc=""
+      touch "$class_pretty.dec"
+    }
+    case "$class_pretty" in
+      "Break" | "Lunch" ) ;;
+      *) desc_size=$(cat "$class_pretty.desc" | wc -l)
+         [[ $desc_size -gt 1 ]] && class_pretty=$(sed -n '2p' "$class_pretty.desc")
+         cat <<EOF
+    <tr style="background-color: #FFFFFF;">
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="right">${course_number}</td>
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="left">${class_pretty}</td>
+    <td style="font-size: 1.2em; border: 1px solid #98BF21;" align="left">${class_desc}</td>
+
+EOF
+        ;;
+    esac
+    
+  done
+
+  echo "</table>"
+
+done
+
+cat <<EOF
+</body>
+</html>
+EOF
+
+}
+
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -c|course [name] Specify the course 
+  -d|debug         bash debugging into
+  -h|help          Display this message
+  -v|version       Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+while getopts ":c:dhv" opt
+do
+  case $opt in
+
+    c|course   )  course="$OPTARG";;
+
+    d|debug    )  set -x;;
+
+    h|help     )  usage; exit 0   ;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+# If command tail = a file and course has not been set, set it.
+[[ -f "$@.conf" ]] && [[ "$course" == "course" ]] && course="${@}"
+[[ -f "$@" ]] && [[ "$course" == "course" ]] && course="${@//.conf/}"
+
+coursefile="${course:-course}.conf"
+deserialize_course "${coursefile}"
+case $? in
+  1) die "Couldn't find course configuration file";;
+  2) die "How'd we get here? $?";;
+esac
+
+course_name="${course_name:-course}"
+course=$(lower "${course}" | tr ' ' '_')
+make_tex6 "${course}"
+sources=
+for pdf in $(ls -1 | grep -i "course_numbered_day_.*\.pdf")
+do
+    sources="$sources $pdf"
+done
+make_htm "${course_name}"
+echo "Created ${course_name}.htm"
+html2pdf "${course_name}.htm"
+pdfunite "${course_name}.pdf" $sources "${course_name}-6s.pdf"
+echo "Created ${course_name}-6s.pdf"
+# Make the full course -1s.pdf
+mv "${course_name}.pdf" "${course_name}-1s.pdf"
+IFS=$'\n'
+for module_name in $(<syllabus.conf)
+do
+    module_pdf="$(echo -n "$module_name" | sed -e 's/ //')-1s.pdf"
+    pdfunite "${course_name}-1s.pdf" "$module_pdf" temp.pdf
+    mv temp.pdf "${course_name}-1s.pdf"
+done
+echo "Created ${course_name}-1s.pdf"
+#make_accelo "${course_name}" > accelo.htm

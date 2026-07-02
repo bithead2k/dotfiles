@@ -1,0 +1,3 @@
+#!/bin/bash
+# cd ~
+find . 2>&1 | grep "$@"

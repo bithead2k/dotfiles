@@ -1,0 +1,228 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  pic_rename
+# 
+#         USAGE:  ./pic_rename 
+# 
+#   DESCRIPTION:  Rename IMG_ files to YYYYMMDD_HHMMSS.jpg format.
+#              Handles duplicate names by incrementing seconds.
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  04/06/2026 09:58:17 AM CDT
+#      REVISION:  ---
+#===============================================================================
+DRY_RUN=0
+# set -x
+
+shopt -s nullglob   # Prevent loop if no files match
+
+uuid_regex="^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}.jpg$"
+img_copy_regex="^IMG_[0-9]{8}_[0-9]{6}_[0-9]{2}.jpg$"
+img_regex="^IMG_[0-9]{8}_[0-9]{6}\.jpg$"
+fb_regex="^FB_IMG_[0-9]{13}.jpg$"
+jpg_regex="^JPG_[0-9]{8}_[0-9]{6}.*\.jpg$"
+screenshot_regex="^Screenshot_[0-9]{8}[-_][0-9]{6}_.*\.jpg$"
+
+IFS=$'\n'
+for img_file in $(ls -1 *.jpg)
+do
+
+    # check file against these formats
+    # if it matches, rename the file to YYYYMMDD_HHmmSS.jpg
+    # for img_copy files, there may be a naming conflict,
+    #   so increment the seconds until there is no conflict.
+
+    [[ -f "$img_file" ]] || continue
+
+    new_name=""
+
+    if [[ "$img_file" =~ $uuid_regex ]]; then
+        # UUID file: Use today's date + current time
+        today=$(date +%Y%m%d)
+        current_time=$(date +%H%M%S)
+        
+        base_name="${today}_${current_time}.jpg"
+        new_name="$base_name"
+
+        # Increment seconds if conflict
+        today=$(date +%Y%m%d)
+        now=$(date +%H%M%S)          # HHMMSS
+
+        # Start with current time
+        hh=${now:0:2}
+        mm=${now:2:2}
+        ss=${now:4:2}
+
+        candidate_hh=$hh
+        candidate_mm=$mm
+        candidate_ss=$ss
+
+        counter=0
+        while true
+        do
+            candidate_time="${candidate_hh}${candidate_mm}$(printf "%02d" "$candidate_ss")"
+            new_name="${today}_${candidate_time}.jpg"
+
+            # If this name is free (or is the original file), we're done
+            if [[ ! -f "$new_name" || "$new_name" == "$img_file" ]]; then
+                break
+            fi
+
+            # Increment time
+            ((candidate_ss++))
+            if (( candidate_ss > 59 )); then
+                candidate_ss=0
+                ((candidate_mm++))
+                if (( candidate_mm > 59 )); then
+                    candidate_mm=0
+                    ((candidate_hh++))
+                    if (( candidate_hh > 23 )); then
+                        echo "Warning: Ran out of time slots today for $img_file"
+                        new_name=""
+                        break
+                    fi
+                fi
+            fi
+
+            ((counter++))
+            if (( counter > 2000 )); then
+                echo "Warning: Too many conflicts for $img_file - giving up"
+                new_name=""
+                break
+            fi
+        done    
+
+    elif [[ "$img_file" =~ $fb_regex ]]; then
+        # UUID file: Use today's date + current time
+        today=$(date +%Y%m%d)
+        current_time=$(date +%H%M%S)
+        
+        base_name="${today}_${current_time}.jpg"
+        new_name="$base_name"
+
+        # Increment seconds if conflict
+        today=$(date +%Y%m%d)
+        now=$(date +%H%M%S)          # HHMMSS
+
+        # Start with current time
+        hh=${now:0:2}
+        mm=${now:2:2}
+        ss=${now:4:2}
+
+        candidate_hh=$hh
+        candidate_mm=$mm
+        candidate_ss=$ss
+
+        counter=0
+        while true
+        do
+            candidate_time="${candidate_hh}${candidate_mm}$(printf "%02d" "$candidate_ss")"
+            new_name="${today}_${candidate_time}.jpg"
+
+            # If this name is free (or is the original file), we're done
+            if [[ ! -f "$new_name" || "$new_name" == "$img_file" ]]; then
+                break
+            fi
+
+            # Increment time
+            ((candidate_ss++))
+            if (( candidate_ss > 59 )); then
+                candidate_ss=0
+                ((candidate_mm++))
+                if (( candidate_mm > 59 )); then
+                    candidate_mm=0
+                    ((candidate_hh++))
+                    if (( candidate_hh > 23 )); then
+                        echo "Warning: Ran out of time slots today for $img_file"
+                        new_name=""
+                        break
+                    fi
+                fi
+            fi
+
+            ((counter++))
+            if (( counter > 2000 )); then
+                echo "Warning: Too many conflicts for $img_file - giving up"
+                new_name=""
+                break
+            fi
+        done    
+
+    elif [[ "$img_file" =~ $img_copy_regex ]]; then
+        # IMG_YYYYMMDD_HHMMSS_XX.jpg
+        if [[ $img_file =~ IMG_([0-9]{8})_([0-9]{6})_([0-9]{2})\.jpg ]]; then
+            date_part="${BASH_REMATCH[1]}"
+            time_part="${BASH_REMATCH[2]}"
+            
+            base_name="${date_part}_${time_part}.jpg"
+            new_name="$base_name"
+
+            counter=1
+            while [[ -f "$new_name" && "$new_name" != "$img_file" ]]; do
+                ss=${time_part:4:2}
+                new_ss=$((10#$ss + counter))
+                if (( new_ss > 59 )); then
+                    echo "Warning: Could not resolve conflict for $img_file"
+                    new_name=""
+                    break
+                fi
+                new_time="${time_part:0:4}$(printf "%02d" "$new_ss")"
+                new_name="${date_part}-${new_time}.jpg"
+                ((counter++))
+            done
+        fi
+
+    elif [[ "$img_file" =~ $screenshot_regex ]]; then
+        # Screenshot_20220828-003012_Galaxy Watch4 Manager.jpg'
+        if [[ $img_file =~ Screenshot_([0-9]{8})[-_]([0-9]{6})(.*)\.jpg ]]; then
+            date_part="${BASH_REMATCH[1]}"
+            time_part="${BASH_REMATCH[2]}"
+            tail_part="${BASH_REMATCH[3]}"
+            new_name="${date_part}_${time_part}${tail_part// /\_}.jpg"
+        fi
+
+    elif [[ "$img_file" =~ $img_regex ]]; then
+        # IMG_YYYYMMDD_HHMMSS.jpg
+        if [[ $img_file =~ IMG_([0-9]{8})_([0-9]{6})\.jpg ]]; then
+            date_part="${BASH_REMATCH[1]}"
+            time_part="${BASH_REMATCH[2]}"
+            new_name="${date_part}_${time_part}.jpg"
+        fi
+
+    elif [[ "$img_file" =~ $jpg_regex ]]; then
+        # IMG_YYYYMMDD_HHMMSS.jpg
+        if [[ $img_file =~ JPEG_([0-9]{8})_([0-9]{6}).*\.jpg ]]; then
+            date_part="${BASH_REMATCH[1]}"
+            time_part="${BASH_REMATCH[2]}"
+            new_name="${date_part}_${time_part}.jpg"
+        fi
+    fi
+
+    # Perform rename or show in dry-run
+    if [[ -n "$new_name" && "$new_name" != "$img_file" ]]; then
+        if [[ -f "$new_name" ]]; then
+            echo "Conflict (unresolved): $img_file → $new_name"
+        else
+            if [[ $DRY_RUN -gt 0 ]]; then
+                echo "[DRY RUN] Would rename: $img_file → $new_name"
+            else
+                echo "Renaming: $img_file → $new_name"
+                mv "$img_file" "$new_name"
+            fi
+        fi
+    fi
+done
+
+if [[ $DRY_RUN -gt 0 ]]; then
+    echo "=== Dry run completed. No files were changed. ==="
+else
+    echo "Picture rename operation completed."
+fi
+

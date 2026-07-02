@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+URL='https://data.texas.gov/resource/4g9k-2c6m.json'
+LIMIT=50000
+OFFSET=0
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+while :; do
+  page="$(
+    curl -sS "${URL}?\$limit=${LIMIT}&\$offset=${OFFSET}"
+  )"
+
+  count="$(jq 'length' <<<"$page")"
+  [[ "$count" -eq 0 ]] && break
+
+  jq -r '
+    .[] |
+    [
+      .sid_number,
+      .tdcj_number,
+      .name,
+      .current_facility,
+      .gender,
+      .race,
+      .age,
+      .projected_release,
+      .maximum_sentence_date,
+      .parole_eligibility_date,
+      .case_number,
+      .county,
+      .offense_code,
+      .tdcj_offense,
+      .sentence_date,
+      .offense_date,
+      .sentence_years,
+      .last_parole_decision,
+      .next_parole_review_date,
+      .parole_review_status
+    ] | @csv
+  ' <<<"$page" >> "$tmp"
+
+  OFFSET=$((OFFSET + LIMIT))
+done
+
+psql -p 5432 -v ON_ERROR_STOP=1 \
+  -c "\\copy kroybal.tdcj_ingestion (sid_number, tdcj_number, inmate_name, current_facility, gender, race, current_age, projected_release, maximum_sentence_date, parole_eligibility_date, case_number, county, offense_code, tdcj_offense, sentence_date, offense_date, sentence_years, last_parole_decision, next_parole_review_date, parole_review_status) FROM '$tmp' WITH (FORMAT csv)"

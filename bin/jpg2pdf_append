@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Append one or more JPG files to an existing PDF.
+# Usage: ./append_jpg_to_pdf.sh input.pdf image1.jpg [image2.jpg ...]
+# Output: input_combined.pdf
+
+set -euo pipefail
+
+
+
+ScriptVersion="1.3"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} -p <pdf_file> image1.jpg [image2.jpg [...]] [options] [--] 
+
+  Options: 
+  -d|debug      set -x
+  -h|help       Display this message
+  -p|pdf file   Filename to append to
+  -v|version    Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":dhp:v" opt
+do
+  case $opt in
+
+    d|debug    ) set -x;;
+
+    h|help     )  usage; exit 0   ;;
+
+    p|pdf      )  input_pdf="$OPTARG";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+# Validate args: need -p and at least one image
+if [[ -z "${input_pdf:-}" ]]; then
+  echo "Error: -p <pdf_file> is required." >&2
+  usage; exit 1
+fi
+if [[ "$#" -lt 1 ]]; then
+  echo "Error: provide at least one image to append." >&2
+  usage; exit 1
+fi
+
+if [ ! -f "$input_pdf" ]; then
+  cat > "$input_pdf" <<'EOF'
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [] /Count 0 >>
+endobj
+trailer
+<< /Root 1 0 R >>
+%%EOF
+EOF
+
+fi
+
+jpg_files=("$@")
+
+# Dependencies: prefer img2pdf+pdfunite; fallback needs ImageMagick too
+need() { command -v "$1" >/dev/null 2>&1 || { echo "Missing: $1"; exit 1; }; }
+
+# Always need pdfunite for the final merge
+need pdfunite
+
+# Workspace
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+output_pdf="${input_pdf%.pdf}_combined.pdf"
+img_pdf_all="$tmp/images.pdf"
+
+try_img2pdf_all() {
+  if command -v img2pdf >/dev/null 2>&1; then
+    # Use img2pdf first (fast, lossless for JPEG content)
+    # Avoid shell glob pitfalls; pass all args as-is.
+    img2pdf --auto-orient "${jpg_files[@]}" -o "$img_pdf_all"
+    return 0
+  fi
+  return 1
+}
+
+sanitize_with_im() {
+  # Require ImageMagick's "magick" or "convert"
+  if command -v magick >/dev/null 2>&1; then
+    local im="magick"
+  elif command -v convert >/dev/null 2>&1; then
+    local im="convert"
+  else
+    echo "Error: Need ImageMagick (magick/convert) for fallback path." >&2
+    exit 1
+  fi
+
+  local pages=()
+  local idx=1
+  for f in "${jpg_files[@]}"; do
+    # Handle MPO (and any multi-image) by selecting the first frame via [0]
+    # Normalize metadata and colorspace for PDF embedding.
+    # Density 300 PPI gives reasonable print quality.
+    out="$tmp/page_${idx}.pdf"
+    "$im" "$f[0]" \
+      -units PixelsPerInch -density 300 \
+      -strip -colorspace sRGB \
+      -alpha remove -alpha off \
+      "$out"
+    pages+=( "$out" )
+    idx=$((idx+1))
+  done
+
+  # Unite all per-page PDFs into a single images.pdf
+  pdfunite "${pages[@]}" "$img_pdf_all"
+}
+
+# 1) Fast path
+if ! try_img2pdf_all; then
+  echo "Info: img2pdf not found or not used; switching to ImageMagick fallback." >&2
+  sanitize_with_im
+else
+  # If img2pdf succeeded but Pillow warned or died earlier, user likely retried.
+  # Still proceed with combined result.
+  true
+fi
+
+# 2) Merge original with images.pdf
+pdfunite "$input_pdf" "$img_pdf_all" "$output_pdf"
+echo "Combined PDF created: $output_pdf"
+

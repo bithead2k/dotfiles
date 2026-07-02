@@ -1,0 +1,132 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: get_ham
+# 
+#         USAGE: ./get_ham CALLSIGN
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#               Requires: pup go install github.com/ericchiang/pup@latest
+#               pup requires go 1.25+
+#          BUGS: ---
+#         NOTES: ---
+#               ARRL Advanced Call Sign Search via POST
+#        AUTHOR: Kirk Roybal (), Kirk.Roybal@gmail.com
+#  ORGANIZATION: 
+#       CREATED: 04/29/2026 11:03:14 PM
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+PERSON=
+CALLSIGN=
+
+function die(){
+    retval=$1
+    shift
+    echo -e "$@" >&2
+    exit $retval
+}
+
+function urlencode() {
+    local string="${1:-}"
+    if [ -z "$string" ]; then
+        echo ""
+        return 0
+    fi
+    curl -s -G -w "%{url_effective}\n" \
+         --data-urlencode "=$string" \
+         "http://example.com" | cut -c12- | 
+        tail -n 1 | sed 's_^.*/?__'
+
+}
+
+if [ -z "$1" ]; then
+  echo "Usage: $0 <callsign>"
+  echo "Example: $0 W1AW"
+  exit 1
+fi
+
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+    cat <<- EOT
+
+    Usage :  ${0##/*/} [options] [--] 
+
+    Options: 
+    -c|call [sign]
+    -d|debug      set -x
+    -h|help       Display this message
+    -n|name [Person]
+    -v|version    Display script version
+
+EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":c:dhp:v" opt
+do
+    case $opt in
+
+        c|call     )  CALLSIGN=$(echo "$OPTARG" | tr '[:lower:]' '[:upper:]') ;;
+
+        d|debug    ) set -x;;
+
+        h|help     )  usage; exit 0   ;;
+
+        p|person   )  CALLSIGN=$(urlencode "$OPTARG");;
+
+        v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+        \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+            usage; exit 1   ;;
+
+    esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+[[ "$PERSON" == "" ]] && [[ "$CALLSIGN" == ""  ]] && CALLSIGN=$(echo "$1" | tr '[:lower:]' '[:upper:]')  # Force uppercase
+
+[[ "$PERSON" == "" ]] && [[ "$CALLSIGN" == ""  ]] && { usage; die 4 "No inputs found."; }
+
+POST_URL="https://www.arrl.org/advanced-call-sign-search"
+
+[[ -f "${CALLSIGN}.html" ]] && die 1 "File $CALLSIGN.html already exists."
+
+# echo "Searching ARRL for call sign: $CALLSIGN"
+
+wget -qO- --post-data "data[Search][terms]=$CALLSIGN" \
+     --header "Content-Type: application/x-www-form-urlencoded" \
+     --header "User-Agent: Mozilla/5.0 (compatible; ARRL-Search-Script/1.0)" \
+     "$POST_URL" > "${CALLSIGN}.html"
+
+[[ -f "${CALLSIGN}.html" ]] || die 3 "File $CALLSIGN.html not created."
+
+# Show key results
+if grep -q "No results" "${CALLSIGN}.html"; then
+  die 2 "No results found for $CALLSIGN"
+else
+  # echo "Results saved to ${CALLSIGN}.html"
+
+  cat "${CALLSIGN}.html" | pup 'div.list2 li' |   #<-- Handy html parser that cuts down the parsing
+      sed -e 's/<[^>]*>//g' -e 's/^[ \t]\+//' -e 's/[ \t]\+/ /g' -e '/^$/d'
+
+
+  # grep -E "(Call Sign|Name|Address|License Class|Grant Date|Expire)" "${CALLSIGN}.html" -A 20 | head -n 30
+fi
+
+# If we made it, we delete it
+[[ -f "${CALLSIGN}.html" ]] && rm "${CALLSIGN}.html"

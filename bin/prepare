@@ -1,0 +1,59 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: prepare
+# 
+#         USAGE: ./prepare
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 08/04/2017 07:25
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+#set -x
+
+function die() {
+    echo -e "$*"
+    exit 1
+}
+
+function usage() {
+    die "Usage $0:\n$0 course"
+}
+
+[[ $# -ne 1 ]] && usage
+
+[[ -f $1.conf ]] || die "Course configuration file $1.conf not found"
+
+# Don't know why the Makefile doesn't do this
+pdfunite $1_numbered_day_*.pdf $1_all.pdf
+# pdf2gs $1_all.pdf
+#
+[[ -d $1_print ]] && rm -rf $1_print
+mkdir $1_print
+mv $1_all.pdf $1_print
+pushd $1_print
+pdftk $1_all.pdf burst output $1_page_%03d.pdf
+pc=$(ls $1_page*.pdf | wc -l)
+for (( i=1; i<=pc; i=i+2 ))
+do
+    (( j=i+1 ))
+    [[ $i -eq $pc ]] && 
+        cp $1_page_$(printf "%03i" $i).pdf $1_pair_$(printf "%03i" $i).pdf || 
+        pdftk A=$1_page_$(printf "%03i" $i).pdf B=$1_page_$(printf "%03i" $j).pdf cat output $1_pair_$(printf "%03i" $i).pdf
+done
+
+rm $1_page_*.pdf
+rm $1_all.pdf
+[[ -f doc_data.txt ]] && rm doc_data.txt
+# provided the printer has a duplexer...
+#lpr -o sides=two-sided-long-edge $1_all.ps
+popd

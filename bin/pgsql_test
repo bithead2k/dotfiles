@@ -1,0 +1,46 @@
+#!/bin/bash
+
+set -o nounset                              # Treat unset variables as an error
+
+ScriptVersion="1.0"
+
+# Startup script engine
+mydir=$(dirname "$0")
+if [ -f "$mydir/essential_functions" ]; then
+    . "$mydir/essential_functions"
+elif [ -f "$mydir/libs/essential_functions" ]; then
+    . "$mydir/libs/essential_functions"
+else
+    echo "Could not load basic functions" >&2
+    exit 1
+fi
+
+# Global counter for the unit tests
+# required by assert_engine
+
+
+# Load all of the libraries
+include shell_helper_functions
+include assert_engine
+include assert_message_functions
+include assert_unit_tests
+include pgsql_functions
+include assert_environment_functions
+
+# No more assertion engine failures from this point
+failures=0
+
+core_dump_location
+
+PSQL=$(psql_assemble)
+assert_condition "psql location: $PSQL" "echo $PSQL" "exist"
+TIMEOUT=$(find_timeout)
+assert_condition "timeout location: $TIMEOUT" "echo $TIMEOUT" "exist"
+PSQL="$TIMEOUT $PSQL -v ON_ERROR_STOP=1 "
+echo "$PSQL"
+echo "SELECT 1/0;" | $PSQL || die $? "Can't divide by zero"
+
+[[ $failures -gt 0 ]] && die 1 "This should go to stderr"
+
+
+exit 0

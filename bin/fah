@@ -1,0 +1,22 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: fah
+# 
+#         USAGE: ./fah 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 05/06/2020 12:43
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+sudo launchctl $1 -w /Library/LaunchDaemons/org.foldingathome.fahclient.plist

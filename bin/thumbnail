@@ -1,0 +1,2 @@
+#!/bin/bash
+for img in IMG_*.JPG; do num=$(echo $img | sed 's/[^[:digit:]]//g'); convert  $img -resize 320 THUMB_$num.JPG; done

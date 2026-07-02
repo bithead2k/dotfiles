@@ -1,0 +1,5 @@
+#!/bin/bash
+for ((i==1;i<=8;i++))
+do
+    psql -qtAp 543$i -c "SELECT '543$i', table_schema || '.' || table_name  FROM information_schema.tables WHERE table_name ~ '$@';" 2> /dev/null
+done

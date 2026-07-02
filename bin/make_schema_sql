@@ -1,0 +1,27 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: make_schema_sql
+# 
+#         USAGE: ./make_schema_sql 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 04/22/2016 12:49
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+[[ -z $1 ]] && {
+    echo "requires schema ticket number as parameter"
+    exit 1
+}
+
+pbpaste | ssh sync01bd.d.tripadvisor.com "cat - > ~/source/schema/SCHEMA-$1.sql"

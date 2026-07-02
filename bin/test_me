@@ -1,0 +1,10 @@
+#!/bin/bash
+#
+case $(echo "enabled") in
+    enabled) 
+        echo "yeah"
+        ;;
+    *)
+        echo "not so much"
+        ;;
+esac

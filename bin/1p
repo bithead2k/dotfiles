@@ -1,0 +1,3 @@
+#!/bin/bash -l
+
+cat ~/1p_recover.txt | xclip -selection clipboard

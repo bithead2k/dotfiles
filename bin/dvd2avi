@@ -1,0 +1,9 @@
+#!/opt/local/bin/bash
+#http://idolinux.blogspot.com/2008/09/encode-dvd-to-avi-with-mplayer-on-linux.html
+mplayer dvd:// -v -dumpstream -dumpfile dump.vob
+mencoder -ovc xvid -oac mp3lame \
+ -xvidencopts fixed_quant=4 -lameopts cbr:br=192:aq=1 \
+ -aid 128 -vf crop=720:352:0:62,yadif -lameopts vol=3 \
+ -o dvd.avi dump.vob
+rm dump.vob
+echo "dumped DVD to dvd.avi"

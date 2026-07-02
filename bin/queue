@@ -1,0 +1,47 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: send a prepared course to the print queue
+# 
+#         USAGE: ./queue
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 08/04/2017 07:25
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+#set -x
+
+function die() {
+    echo -e "$*"
+    exit 1
+}
+
+function usage() {
+    die "Usage $0:\n$0 course"
+}
+
+[[ $# -ne 1 ]] && usage
+
+[[ -f $1.conf ]] || die "Course configuration file $1.conf not found"
+
+pushd $1_print
+
+pages=$(ls *_pair_*.pdf | sort)
+for page in ${pages[@]}
+do
+    echo "#Queuing $page"
+    # provided the printer has a duplexer...
+    lpr -o raw -o sides=two-sided-long-edge -# ${2:-1} $page
+    sleep 50  # it takes about 50s to print 2 pages.
+done
+
+popd

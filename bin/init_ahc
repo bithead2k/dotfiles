@@ -1,0 +1,434 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: init_ahc
+# 
+#         USAGE: ./init_ahc report.md {customer_name}
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 10/16/2017 12:43
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+function instr() {
+
+  [[ $(grep "$2" "$1" | wc -l) -gt 0 ]] && echo 1
+
+}
+
+duedate=$(/bin/date -v+4d +'%m/%d/%Y')
+sed -i -e 's/supportability check/architectural health check/g' \
+	-e 's/author: 2ndQuadrant/author:\n - 2ndQuadrant\n - Kirk Roybal/' \
+	-e '/title: Database/s/.*/title: Architectural Health Check/' \
+	-e "/Revision 1.0/s_< date >; < name of author/engineer >_$duedate;Kirk L. Roybal_" \
+        -e "/customer:/s/.*/customer: $2/" $1
+
+[[ $(grep 'classification: partner-confidential' $1 | wc -l) -eq 0 ]] && sed -i -e '2iclassification: partner-confidential' $1
+
+
+[[ $(instr $1 '|YELLOW|Read-ahead settings') ]] && {
+
+DEVICES=$(grep 'YELLOW|Read-ahead settings must be checked' $1 | sed -e 's/^.*: //' -e 's/ loaded=.*$//')
+
+DEVICES=$(echo ${DEVICES} | sed -e 's/ /\n    /g')
+
+SETTINGS=$(echo "${DEVICES[@]}" | sed -e 's_^_ # /sbin/blockdev --setra 4096 _' -e 's/=.*$//' -e 's/^[[:space:]]*/    /')
+
+DATA="### Read-Ahead
+
+Having a sufficiently sized read-ahead buffer can significantly increase a
+storage devices' sequential read performance without adversely affecting other
+access patterns.  These are the Linux default settings for read-ahead:
+
+    ${DEVICES[@]}
+
+The readahead on the database storage drives is set to [:TODO:].  The default
+read-ahead value on the database device does not offer the best performance.
+The optimal value depends on the storage system, with larger disk arrays
+benefiting from higher values, particularly for large sequential scans.
+
+As the database is using a fairly large disk array, we recommend increasing the
+value to 8192 or perhaps even 16384. With the current amount of I/O operations,
+a positive impact can be expected here. It is possible, though, that the storage
+already uses a read-ahead on its own.
+
+Here is an example of checking and setting readahead values:
+
+${SETTINGS[@]}
+"
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/|YELLOW|Read-ahead settings/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Size the read-ahead buffer' $1
+
+}
+
+[[ $(instr $1 '|YELLOW|Transparent Huge Pages are enabled') ]] && {
+
+DATA="### Transparent Huge Pages
+
+Transparent Huge Pages (THP) should be disabled.  In our experience it can
+cause significant performance degradations as memory becomes more fragmented.
+As PostgreSQL can not really benefit from transparent huge pages, and the issues
+caused by defragmentation are very common, we strongly recommend disabling THP.
+Simply set all the options to **never** or **no**.
+
+    echo never > /sys/kernel/mm/transparent_hugepage/enabled
+    echo never > /sys/kernel/mm/transparent_hugepage/defrag
+    echo no > /sys/kernel/mm/transparent_hugepage/khugepaged/defrag
+
+Recent PostgreSQL versions (since 9.4) can however benefit from using explicit
+Huge Pages for shared memory (**shared_buffers** etc.). This requires determining
+the necessary number of huge pages using **VmPeak**, hugepage size (typically 2MB)
+and then settings **vm.nr_hugepages** kernel parameter.
+
+The procedure is discussed in the [online documentation](https://www.postgresql.org/docs/current/static/kernel-resources.html#LINUX-HUGE-PAGES)
+but a short version is:
+
+    $ head -1 /path/to/data/directory/postmaster.pid
+    4170
+    $ grep ^VmPeak /proc/4170/status
+    VmPeak:  6490428 kB
+
+    $ cat /proc/meminfo \| grep Hugepagesize
+    Hugepagesize:       2048 kB
+
+    $ sysctl -w vm.nr_hugepages=3170
+
+This will give you the benefits of huge pages (lower overhead) when managing
+the large shared memory area, but without the issues associated with
+defragmenting memory for regular allocations.
+
+
+To prevent the changed values from being enabled by default by a server reboot,
+the bootloader needs to be modified.  For example, this can be achieved with
+grub by running:
+
+    grubby --update-kernel=ALL --args='transparent_hugepage=never'
+"
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/|YELLOW|Transparent Huge Pages/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Turn off transparent huge pages' $1
+
+}
+
+[[ $(instr $1 'YELLOW|log_checkpoints is off') ]] && {
+
+DATA='
+### log_checkpoints is off
+
+Logging checkpoints also logs restartpoints, and is generally recommended.   Some statistics are included in the log messages, including the number of buffers written and the time spent writing them.  This information is valuable to determine how often checkpoints are reached, and further tune the checkpoints parameters.
+
+'
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/YELLOW|log_checkpoints is off/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Consider logging checkpoints' $1
+
+}
+
+[[ $(instr $1 'Checkpoint segments is probably too low') ]] && {
+
+DATA='
+### Checkpoint segments is probably too low
+
+\* increase `checkpoint_timeout` and `checkpoint_segments` to make checkpoints
+  less frequent
+
+```conf
+checkpoint_timeout = 15min
+checkpoint_segments = 128
+```
+
+'
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/Checkpoint segments is probably too low/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Consider increasing checkpoint segments' $1
+
+}
+
+[[ $(instr $1 'PostgreSQL log files are produced inside the data directory') ]] && {
+
+DATA='
+### Move PostgreSQL logs to a different partition
+
+The pg_log directory is located on the same disk volume as the PostgreSQL data directory.  These logs are rotated, and form a ring buffer that PostgreSQL uses for a journal.  However, in exceptional circumstances (like when a backup is started and not finished), PostgreSQL may elect to retain the WAL files indefinitely.  This has the potential to fill up the disk volume, causing PostgreSQL to fail to commit changes.
+
+Although this is non-standard behavior, it is possible.  When it happens, there is a potential to corrupt the data directory.  PostgreSQL will no longer mount the cluster, and recovery from this position is extremely difficult, if not impossible.
+
+Best practices dictate that the log directory be located on a different disk volume from the PostgreSQL data directory.
+
+'
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/PostgreSQL log files are produced inside the data directory/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Move the logs off of the PostgreSQL partition' $1
+
+}
+
+
+[[ $(instr $1 'Virtual memory configuration is using RAM percentages') ]] && {
+
+DATA='
+### Virtual memory configuration
+
+Read caching is a clear win in most cases, balanced against applications using the RAM directly. Write caching is trickier. The Linux kernel stages disk writes into cache, and over time asynchronously flushes them to disk. This has a nice effect of speeding disk I/O but it is risky. When data is not written to disk there is an increased chance of losing it.
+
+There is also the chance that a lot of I/O will overwhelm the cache.  Writing a lot of data to disk all at once will cause large pauses. Those pauses are a result of the cache deciding that there is too much data to be written asynchronously, and switches to writing synchronously. The filesystem also has to preserve write order, so when it starts writing synchronously it first has to destage the cache. Hence the long pause.
+
+These are controllable options, and based on workloads and data size you can decide how you want to set them up.  
+
+To view your current settings:
+
+```bash
+$ sysctl -a \| grep dirty
+ vm.dirty_background_ratio = 10
+ vm.dirty_background_bytes = 0
+ vm.dirty_ratio = 20
+ vm.dirty_bytes = 0
+ vm.dirty_writeback_centisecs = 500
+ vm.dirty_expire_centisecs = 3000
+```
+
+**vm.dirty_background_ratio** is the percentage of system memory that can be filled with "dirty” pages — memory pages that still need to be written to disk — before the pdflush/flush/kdmflush background processes kick in to write it to disk. This example is 10%, so if the virtual server has 32 GB of memory that’s 3.2 GB of data that can be sitting in RAM before something is done.
+
+**vm.dirty_ratio** is the absolute maximum amount of system memory that can be filled with dirty pages before everything must get committed to disk. When the system gets to this point all new I/O blocks until dirty pages have been written to disk. This is often the source of long I/O pauses, but is a safeguard against too much data being cached unsafely in memory.
+
+**vm.dirty_background_bytes** and **vm.dirty_bytes** are another way to specify these parameters. If you set the _bytes version the _ratio version will become 0, and vice-versa.
+
+The statistics on the page cache are also visible in /proc/vmstat:
+
+```bash
+$ cat /proc/vmstat \| egrep "dirty\|writeback"
+ nr_dirty 878
+ nr_writeback 0
+ nr_writeback_temp 0
+```
+
+In this case there are 878 dirty pages waiting to be written to disk.
+
+#### Approach 1: Decreasing the Cache
+
+In systems that have fast disk subsystems with built-in **non-**battery-backed NVRAM caches, keeping things in the OS page cache is risky.  Try to send I/O to the array in a more timely fashion and reduce the chance our local OS will, to borrow a phrase from the service industry, be “in the weeds.” To do this we lower vm.dirty_background_ratio and vm.dirty_ratio by adding new numbers to /etc/sysctl.conf and reloading with “sysctl –p”:
+
+```conf
+vm.dirty_background_ratio = 5
+vm.dirty_ratio = 10
+```
+
+This is a typical approach on virtual machines, as well as Linux-based hypervisors. I would not suggest setting these parameters to zero, as some background I/O is nice to decouple application performance from short periods of higher latency on your disk array \& SAN (“spikes”).
+
+#### Approach 2: Increasing the Cache
+
+Raising the cache dramatically has positive effects on performance for high rates of change to the same data pages. In theory, by allowing more dirty pages to exist in memory  the same blocks will be rewritten in cache, and will only flush occasionally to the actual disk. To do this we raise the parameters:
+
+```conf
+vm.dirty_background_ratio = 50
+vm.dirty_ratio = 80
+```
+
+Increasing the **vm.dirty_expire_centisecs** parameter will allow more time in cache.  This runs the risk of long I/O pauses if that cache gets full and needs to destage, because on large VMs there will be a lot of data in cache.
+
+#### Approach 3: Both Ways
+
+Infrequent, bursty traffic to slow disk (batch jobs at the top of the hour, midnight, etc.) can be spread out. In that case an approach might be to allow all that write I/O to be written to the cache so that the background flush operations can deal with it asynchronously over time:
+
+```conf
+vm.dirty_background_ratio = 5
+vm.dirty_ratio = 80
+```
+
+The background processes will start writing right away when the 5% ceiling is reached, but the system will not force synchronous I/O until it gets to 80% full. At this point, adjust the size of system RAM and vm.dirty_ratio to be able to consume all the written data.  Buy a UPS and make sure you can destage cache before the UPS runs out of power.
+
+Create a follow-up plan to gather hard data to support the chosen strategy.   This data resides in /proc/vmstat, /proc/meminfo, iostat, vmstat, and /proc/sys/vm.*.'
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/Virtual memory configuration is using RAM percentages/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Tune the virtual memory configuration' $1
+
+}
+
+[[ $(instr $1 'A minor release upgrade is available') ]] && {
+
+DATA='
+### Update to the latest minor release
+
+&
+
+Minor releases do not require changes to the directory or data structure of PostgreSQL.   They are safe to update in place, and do not require a dump/reload of data.  Updating the binaries will require a stop/start of the postmaster service, which is typically a minimally invasive procedure.
+
+Best practices dictate that these minor updates are applied as they become available.  These updates typically include security patches and bug fixes, which are considered too important to wait for the next major release.
+
+'
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/A minor release upgrade is available/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Update to the latest minor release' $1
+
+}
+
+[[ $(instr $1 'archive_mode is off') ]] && {
+
+DATA='
+### Set archive_mode to always
+
+**archive_mode** When archive_mode is enabled, completed WAL segments are sent to archive storage by setting archive_command. In addition to off (to disable), there are two modes: on, and always. During normal operation, there is no difference between the two modes, but when set to always the WAL archiver is enabled also during archive recovery or standby mode. In always mode, all files restored from the archive or streamed with streaming replication will be archived (again).
+
+**archive_mode** and **archive_command** are separate variables so that **archive_command** can be changed without leaving archiving mode. This parameter can only be set at server start. archive_mode cannot be enabled when wal_level is set to minimal.
+
+Turning on the archive, even when not using replication, is required for file-level backups and disastery recovery.
+
+'
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/archive_mode is off/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Turn on archive_mode' $1
+
+}
+
+[[ $(instr $1 '|RED|max connections') ]] && {
+
+DATA='
+### Use pgBouncer for connection balancing
+
+pgBouncer is a connection proxy in front of the database instances
+
+* understands the PostgreSQL protocol, and thus can support advanced features
+* supports statement, transaction (recommended) and session pooling mode
+* manages and multiplexes a pool of connections
+    * particularly useful when the number of opened/active connections is difficult to control on the application side
+* allows switchover/failover with minimal impact on connected clients
+    When using replication, pgBouncer can be used to quickly redirect the traffic from old to new master database backend, both for switchover and failover events.
+* provides server resources savings
+    With clients connecting to pooler instead of backend database, with the right settings of connection pools, consumption of backend resources is reduced, not having to allocate CPU/memory/networking for every client connection.
+* protects database credentials
+    Username, password, even the database name used by client to connect to pgBouncer can differ from these used in backend database. You can avoid distributing database credentials to client applications if you do not want to.
+
+#### Deployments
+
+The real possibilities of pgBouncer depend on chosen architecture.
+
+* "One box": one db backend and one pgBouncer instance on the same host
+
+This is the simplest option, requiring just one server to run, the simplest
+to manage. The effectivity of server resources savings is lowered here,
+though. Also, in case of server inaccessibility, clients would just lose
+their connections with no possibility to do any traffic redirect.
+
+* Two db backends in replication, pgBouncer on both hosts
+
+These two pgBouncers here can be either load balanced somehow or accessed
+independently. Having two backends in replication gives you the possibility
+to do failover/switchover with traffic redirection. Again, if the whole server
+is inaccessible, given pgBouncer instance is also affected and without higher
+load balancer layer, client connections are (partially) lost.
+
+* Two db backends in replication, pgBouncer on independent host
+
+Effective way for reducing backend resources, traffic redirection, pgBouncer
+is not affected by any of backend servers inaccessibility. However, the
+pgBouncer itself may become the bottleneck if its host is in trouble.
+
+* Two db backends in replication, two pgBouncers on independent hosts
+
+Again, pgBouncers can be either load balanced or accessed independently.
+This is the most bulletproof option for HA solutions, as both layers, backends
+and poolers, are doubled. It is, however, the most demanding one, requiring
+four servers to run and manage.
+
+* More complex scenarios
+
+There are more possibilities how to configure the architecture.
+You can have more than two db backends. It is even possible to have pgBouncer
+in more layers. But this is probably out of scope for this project.
+
+'
+
+# Add "\n" to the end of lines, then strip off the newline
+DATA=$(echo -e "$DATA" | sed -e 's_$_\\n_g' | tr -d '\n')
+
+# Use sed to replace with multiline text, restoring the newline
+sed -i -e "/|RED|max connections/s|.*|${DATA}|" $1
+
+# Add this item to the follow-up section
+sed -i -e '/Follow-up recommendations/a\
+\* Consider using a load balancer' $1
+
+}
+
+
+#*repmgr (cluster management)*
+#
+#* maintains information about status of all nodes participating in the
+#  streaming replication
+#
+#* provides commands to provision and register a new standby, and also to
+#  perform switchover/failover to a standby
+#
+#* allows automated failovers
+#
+#*Barman (backup / recovery)*
+#
+#* backup solution based on physical (hot) backups and WAL archival
+#
+#* configurable backup retention and other related features
+#

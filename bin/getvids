@@ -1,0 +1,48 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: getvids
+# 
+#         USAGE: ./getvids 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 05/23/2016 17:12
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+set -x
+today=$(date +%Y%m%d)
+mkdir -p ~/Video/${today}
+
+function hwm() {
+    ls -1 ~/Video/${today}/*.mp4 2>/dev/null | sort | tail -n1 | sed 's/\.mp4//' | sed 's_.*/__'
+}
+hwmv=$(hwm)
+(( hwmv++ ))
+
+#find the Sony SIM card with video on it.
+IFS=$'\n'
+for slot in $(ls -1 /Volumes)
+do
+    mdir="/Volumes/${slot// /\\ }/PRIVATE/AVCHD/BDMV/STREAM/*.MTS"
+    mfile=$(ls -1 $mdir 2>/dev/null | sort | tail -n1 | sed 's/.MTS//' | sed 's_.*/__')
+    [[ ! -z $mfile ]] && {
+        for infile in $mdir
+        do
+            ofile=$(printf '%05i' $hwmv)
+            mts2mpg $infile ~/Video/$today/$ofile.mpg
+            mv $infile ~/Video/$today/$ofile.mts
+            (( hwmv++ ))
+        done
+    }
+    
+done
+

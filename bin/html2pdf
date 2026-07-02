@@ -1,0 +1,22 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  html2pdf
+# 
+#         USAGE:  ./html2pdf 
+# 
+#   DESCRIPTION:  Convert an html file to pdf using brave
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/12/2023 06:59:53 PM CST
+#      REVISION:  ---
+#===============================================================================
+echo "This doesn't really work,work.  The link references point to the html files, so if you click on anything, it opens in a browser"
+pdf_file="$(echo "$1" | sed 's/\.htm.*$'/\.pdf/)"
+brave-browser --headless --disable-gpu --print-to-pdf="${pdf_file}" "$1" --print-to-pdf-no-header

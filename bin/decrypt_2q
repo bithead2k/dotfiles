@@ -1,0 +1,162 @@
+#!/opt/local/bin/bash
+#!/bin/bash
+#### Decrypting remote gpg encripted files ##################################
+# title           decrypt.sh                                                #
+# author          Darko Milojkovic                                          #
+# version         1.8                                                       #
+# date            2019-07-21                                                #
+# usage           bash decrypt.sh                                           #
+# important       Set proper username and default remote server before use. #
+#############################################################################
+REMOTE_SERVER=52.59.39.2 # Default server
+USERNAME=kirk.roybal # User account
+RLOCATION=rdba/customers
+CREDS_LOCATION=rdba/creds
+CUSTOMER=$1
+decrypt() {
+        PASSPHRASE=$(ssh $USERNAME@$REMOTE_SERVER cat $RLOCATION/$CUSTOMER/ssh_passphrase.asc | gpg2 -d | tail -n 1)
+        KEY="id_$CUSTOMER"
+        ssh $USERNAME@$REMOTE_SERVER chmod 600 $CREDS_LOCATION/$CUSTOMER/$KEY
+        echo $PASSPHRASE | ssh $USERNAME@$REMOTE_SERVER ssh-add $CREDS_LOCATION/$CUSTOMER/$KEY
+	echo " "
+	echo "YOU HAVE FOLLOWING LIST OF SSH KEYS ON $REMOTE_SERVER"
+	echo "================================================================================"
+        ssh $USERNAME@$REMOTE_SERVER ssh-add -l
+	echo "================================================================================"
+	echo " "
+}
+rdba_servers() {
+	echo " "
+	echo "PLEASE SELECT ONE OF RDBA SERVERS FROM WHERE YOU ARE CONNECTING TO THE CUSTOMER:"
+	echo "================================================================================"
+	echo " "
+	OPTIONS=("rdba-us-west-1"
+		 "rdba-us-east-1"
+		 "rdba-eu-west-1"
+		 "rdba-eu-central-1"
+		 "NONE (EXIT)"
+	        )
+	select opt in "${OPTIONS[@]}"
+		do
+    			case $opt in
+        			"rdba-us-west-1")
+				break;;
+        			"rdba-us-east-1")
+            			break;;
+        			"rdba-eu-west-1")
+            			break;;
+        			"rdba-eu-central-1")
+            			break;;
+				"NONE (EXIT)")
+				echo "Exiting ..."
+				exit;;
+        			*) echo "invalid option"
+					exit;;
+    			esac
+		done
+	REMOTE_SERVER=$opt
+	echo " "
+	echo "YOU HAVE FOLLOWING LIST OF SSH KEYS ON $REMOTE_SERVER"
+	echo "================================================================================"
+        ssh $USERNAME@$REMOTE_SERVER ssh-add -l
+	echo "================================================================================"
+	echo " "
+	
+}
+choose_customer(){
+	echo " "
+        echo "PLEASE SELECT CUSTOMER FROM THE LIST"
+	echo "================================================================================"
+        echo " "
+        OPTIONS=("Agilis"
+                 "Aperio"
+                 "BUT"
+                 "CUSO"
+		 "Directangular"
+		 "Elsevier"
+		 "ENSO"
+		 "ERoad"
+		 "EURid"
+		 "Experian"
+		 "FDS"
+		 "GolfGenius"
+		 "HPGM"
+		 "Infinity"
+		 "Learning Objects"
+		 "SeeTickets"
+		 "Twitch"
+                 "NONE (EXIT)"
+                )
+	select opt in "${OPTIONS[@]}"
+                do
+                        case $opt in
+                                "Agilis")
+				CUSTOMER="agilis"
+                                break;;
+                                "Aperio")
+				CUSTOMER="aperio"
+                                break;;
+                                "BUT")
+				CUSTOMER="but"
+                                break;;
+                                "CUSO")
+				CUSTOMER="cuso"
+                                break;;
+                                "Directangular")
+				CUSTOMER="directangular"
+                                break;;
+				"Elsevier")
+				CUSTOMER="elsevier"
+				break;;
+                                "ENSO")
+				CUSTOMER="enso"
+                                break;;
+                                "ERoad")
+				CUSTOMER="eroad"
+                                break;;
+                                "EURid")
+				CUSTOMER="eurid"
+                                break;;
+                                "Experian")
+				CUSTOMER="experian"
+                                break;;
+                                "FDS")
+				CUSTOMER="fds"
+                                break;;
+                                "GolfGenius")
+				CUSTOMER="golfgenius"
+                                break;;
+				"HPGM")
+				CUSTOMER="hpgm"
+				break;;
+                                "Infinity")
+				CUSTOMER="infinity"
+                                break;;
+                                "Learning Objects")
+				CUSTOMER="lo"
+                                break;;
+                                "SeeTickets")
+				CUSTOMER="seetickets"
+                                break;;
+                                "Twitch")
+				CUSTOMER="twitch"
+                                break;;
+                                "NONE (EXIT)")
+                                echo "Exiting ..."
+                                exit;;
+                                *) echo "invalid option";;
+                        esac
+                done
+}
+connect(){
+	read -p "Do you want to connect to $REMOTE_SERVER now? (yY/nN)" choice
+	case "$choice" in
+  		y|Y ) ssh $USERNAME@$REMOTE_SERVER;;
+  		n|N ) echo "Exiting ..." exit;;
+  		* ) echo "Invalid option";;
+	esac
+}
+rdba_servers
+choose_customer
+decrypt
+connect

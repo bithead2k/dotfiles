@@ -1,0 +1,27 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: mts2mp4
+# 
+#         USAGE: ./mts2mov
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 05/23/2016 17:45
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+#mencoder "$1" -demuxer lavf -oac copy -ovc copy -of lavf=mp4 -o "$2" 2>&1 |
+#mencoder "$1" -demuxer  -oac copy -ovc copy -of lavf=mp4 -o "$2" 2>&1 |
+#    sed '/Skipping frame!/d'| sed '/Skipping frame/d' | sed '/non-monotonically/d' | sed '/increasing dts/d' |
+#    sed '/Error while writing frame/d'
+
+ffmpeg -i "$1" -vcodec copy -acodec pcm_s16le "$2"

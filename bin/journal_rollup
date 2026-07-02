@@ -1,0 +1,179 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  journal_rollup
+# 
+#         USAGE:  ./journal_rollup 
+# 
+#   DESCRIPTION:  Make the weekly, monthly, yearly rollups
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  02/07/2023 05:23:54 AM CST
+#      REVISION:  ---
+#===============================================================================
+
+ScriptVersion="1.0"
+interval='weekly'
+# we usually want last week
+weekofyear=$(date --date="-1 week" +"%V")
+# and we want last month
+monthofyear=$(date --date="-1 month" +"%m")
+# but only last year if it is the yearly
+gregorianyear=$(date +"%Y")
+
+function die(){
+    retval=$1
+    shift
+    echo -e "$@"
+    exit $retval
+}
+
+function validate_integer() {
+    [[ "$1" =~ ^[0-9]+$ ]] && return 0
+    return 1
+}
+
+function validate_interval() {
+    case "$1" in
+        'yearly' | 'weekly' | 'monthly') return 0;;
+    esac
+    return 1;
+}
+
+function validate_week() {
+    validate_integer $1 || return 1
+    [[ "$1" -gt 0 ]] && [[ "$1" -lt 54 ]] && return 0
+    return 1
+}
+
+function validate_month() {
+    validate_integer $1 || return 1
+    [[ "$1" -gt 0 ]] && [[ "$1" -lt 13 ]] && return 0
+    return 1
+}
+
+function validate_year() {
+    validate_integer $1 || return 1
+    [[ $1 -le $(date +"%Y") ]] && return 0
+    return 1
+}
+
+function days_in_month()
+{
+   s=" 303232332323" # normal year
+   # leap year
+   date -d "2/29/${2}" > /dev/null 2>&1 && s=" 313232332323"  
+   echo $[ ${s:${1}:1} + 28 ]
+}
+
+function expand_date_range(){
+d=$(date --date="$1" +"%F")
+d2=$(date --date="$2 + 1 day" +"%F")
+while [ "$d" != "$d2" ]
+do
+    echo $d
+    d=$(date --date="$d + 1 day" +"%F")
+done
+}
+
+seek_first_day_of_week(){
+    y=$1
+    w=$2
+    (( searchstart=w-1 ))
+    (( searchstart*=7 ))
+    (( searchstart-- )) # just in case of leap year
+    searchstart=$(date --date="$y-01-01 +$searchstart days" +"%F")
+    for ((i=0;i<=10;i++))
+    do
+      d=$(date --date="$searchstart + $i days" +"%F")
+      [[ $(date --date="$d" +"%V")  -eq $w ]] && {
+        echo $d
+        break
+      }
+    done
+    return 0
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -h|help          Display this message
+  -i|interval []   daily,weekly,monthly
+  -m|month    []   Month of year to generate
+  -v|version       Display script version
+  -w|week     []   Week of year to generate
+  -y|year     []   Gregorian year to generate
+
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":hi:m:vw:y:" opt
+do
+  case $opt in
+
+    h|help     )  usage; exit 0   ;;
+
+    i|interval )  validate_interval "$OPTARG" && 
+        interval="$OPTARG" || 
+        die 1 "Options for interval are 'yearly','weekly','monthly'";;
+
+    m|month    )  validate_month $OPTARG &&
+        monthofyear=$OPTARG ||
+        die 4 "Invalid month $OPTARG.  The month is between 1 and 12";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    w|week     )  validate_week "$OPTARG" && 
+        weekofyear=$OPTARG || 
+        die 2 "Invalid week $OPTARG.  The week is between 1 and 53.";;
+
+    y|year     ) validate_year $OPTARG && 
+        gregorianyear=$OPTARG ||
+        die 3 "Invalid year: $OPTARG.  The year cannot be greater than this year.";;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+## only default to last year if we're doing the yearly
+[[ "$interval" == "yearly" ]] && gregorianyear=$(date --date='-1 year' +"%Y")
+
+
+case $interval in
+    "weekly") startingday=$(seek_first_day_of_week $gregorianyear $weekofyear)
+        endingday=$(date --date="$startingday + 6 days" +"%Y-%m-%d" )
+              ;;
+    "monthly") startingday=$(date --date="$gregorianyear-$monthofyear-01" +"%Y-%m-%d")
+              endingday=$(date --date="$gregorianyear-$monthofyear-$(days_in_month $monthofyear $gregorianyear)" +"%Y-%m-%d")
+              ;;
+    "yearly") startingday=$(date --date="$gregorianyear-01-01")
+               endingday=$(date --date="$gregorianyear-12-31")
+              ;;
+esac
+
+for journal in $(expand_date_range $startingday $endingday)
+do
+    echo "Journal: [[journals/${journal//-/_} | $journal ]] [[todo/$journal|ToDo]]"
+done

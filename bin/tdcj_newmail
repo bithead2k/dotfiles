@@ -1,0 +1,111 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE: tdcj_newmail
+#
+#         USAGE: ./tdcj_newmail
+#
+#   DESCRIPTION: 
+#
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@gmail.com
+#  ORGANIZATION: WebFinish LLC
+#       CREATED: 06/09/26 11:38:29
+#      REVISION:  ---
+#===============================================================================
+
+#!/usr/bin/env bash
+set -euo pipefail
+function find_file(){
+first=$(awk '{print tolower($1)}' <<< "$1")
+last=$(awk '{print tolower($NF)}' <<< "$1")
+
+find "$people_dir" -type f -name '*.md' |
+awk -v first="$first" -v last="$last" '
+{
+  f=tolower($0)
+  if (f ~ first && f ~ last) print
+}' | head -n 1
+}
+
+
+REPO=~/Documents/notes
+
+: "${REPO:?REPO must be set}"
+
+clip="$(xclip -selection clipboard -o 2>/dev/null || wl-paste)"
+
+clip=$(echo -e "$clip" | sed -e '1,/^Credit Card Information.*/d'  -e '/^About Us/q' -e '$d')
+
+inmate_name=$(echo -e "$clip" | head -n 5 | sed -e 's/Inbox//' -e '/^×.*/d' -e '/^Keep your contacts funded.*/d' -e 's/To: Kirk Roybal//' -e '/^[[:space:]]*$/d' | tr -d '\r')
+
+clip=$(echo -e "$clip" | sed -e '1,/To: Kirk Roybal.*/d')
+
+# Inmate name: first all-caps line after Inbox
+# inmate_name=$(echo -e "$clip" | head -n 1 | tr -d '\r')
+[[ $inmate_name == ""  ]] && { echo "Inmate not found." >&2 ; exit 1; }
+
+clip=$(echo -e "$clip" | sed -e '1d' -e '/^RE:/d' -e '/To: Kirk Roybal/d' -e '/^[[:space:]]*$/d')
+
+#echo -e "$inmate_name"
+#echo -e "$clip"
+
+letter_dir="$REPO/letters"
+people_dir="$REPO/people"
+
+person_file=$(find_file "$inmate_name")
+#echo $person_file
+inmate_name=$(echo -e "$person_file" | sed -e 's_.*/__' -e 's/\.md//')
+echo "$inmate_name"
+mkdir -p "$letter_dir"
+
+# Date defaults to today because Securus copy often omits date on detail page
+letter_date="$(date +%F)"
+
+# Message body: text after timestamp line until signature/footer
+body="$clip"
+
+
+mail_date="$(
+    printf '%s\n' "$clip" |
+    grep -Eom1 '^[[:space:]]*[0-9]{1,2}[[:space:]]+[A-Z][a-z]{2}[[:space:]]+[0-9]{2}[[:space:]]*$' |
+    xargs
+)"
+[[ $mail_date == "" ]] || {
+	mail_date=$(date --date="$mail_date" +"%Y-%m-%d")
+	letter_date=$mail_date
+}
+
+slug="$(printf '%s' "$inmate_name" | tr ' ' '-')"
+file="$letter_dir/Letter-${slug}-${letter_date}.md"
+
+cat > "$file" <<EOF
+---
+type: letter
+source: securus
+direction: incoming
+date: $letter_date
+inmate: "[[people/$inmate_name]]"
+from: "$inmate_name"
+to: "Kirk Roybal"
+---
+
+# Letter from $inmate_name - $letter_date
+
+From: [[people/$inmate_name]]  
+To: Kirk Roybal  
+Date: $letter_date  
+Source: Securus Emessaging
+
+## Body
+
+$body
+EOF
+
+#printf 'Created: %s\n' "$file"
+
+echo -e "\n[[Letter-${slug}-${letter_date}]]" >> "$person_file" || { echo "File: $person_file not found."; exit 1; }
+

@@ -1,0 +1,24 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: kb
+# 
+#         USAGE: ./kb 
+# 
+#   DESCRIPTION: Invoke an editor in the proper directory to compile the
+#   keyboard firmware.
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 12/03/2019 23:15
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+pushd ~/source/ergodox/qmk_firmware/
+mvim keyboards/ergodox_infinity/keymaps/webfinish/keymap.c

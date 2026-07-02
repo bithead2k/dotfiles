@@ -1,0 +1,40 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: start_shift
+# 
+#         USAGE: ./start_shift 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 07/13/2018 11:21
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                             # Treat unset variables as an error
+
+today=$(today)
+mkdir -p ~/work/2q/shift/${today}
+cd  ~/work/2q/shift/${today}
+[[ ! -f status.md ]] && {
+cat <<EOF > status.md
+---
+title: shift notes
+author: Kirk Roybal
+date: ${today:0:4}-${today:4:2}=${today:2:2}
+---
+
+
+| Ticket | Company | MM | Status | Notes |
+|-------:|:--------|---:|:-------|:------|
+
+EOF
+}
+mvim status.md
+echo -n "cd ~/work/2q/shift/${today}" | pbcopy

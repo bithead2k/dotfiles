@@ -1,0 +1,35 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  anno_domini
+# 
+#         USAGE:  ./anno_domini 
+# 
+#   DESCRIPTION:  Formally format a date 
+#       (e.g.  Tuesday, the Twelfth of December, in the year of our Lord 2023)
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/02/2023 07:12:12 AM CST
+#      REVISION:  ---
+#===============================================================================
+
+function die() {
+    retval=$1
+    shift
+    echo -e -e "$@"
+    exit $retval
+}
+
+thedate=$(date +"%F")
+[[ $# -eq 1 ]] && thedate=$1
+
+dayofmonth=$(date --date="$thedate" +"%e" 2>/dev/null) || die 2 'not a valid date'
+ordinalofday=$(day_ordinal $dayofmonth)
+
+date --date="$thedate" +"%A, the $ordinalofday of %B, in the year of our Lord %Y W%V G%j"

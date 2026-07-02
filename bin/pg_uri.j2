@@ -1,0 +1,1 @@
+PGCONNECT_TIMEOUT=5 psql -d postgres://{{ FLYWAY_USER }}:{{ FLYWAY_PASSWORD }}@{{ DB_HOST }}:5432/{{ DB_NAME }} -v ON_ERROR_STOP=1 -qtAc ""

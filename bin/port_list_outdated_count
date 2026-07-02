@@ -1,0 +1,22 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: port_list_outdated_count
+# 
+#         USAGE: ./port_list_outdated_count
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 12/15/2019 01:34
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+ 
+port list outdated 2>/dev/null | wc -l

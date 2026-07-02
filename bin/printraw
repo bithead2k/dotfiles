@@ -1,0 +1,4 @@
+#!/opt/local/bin/bash
+
+#lp -d C3060FW -o sides=two-sided-long-edge -o raw "$@"
+lp -d rawdog -o sides=two-sided-long-edge -o raw "$@"

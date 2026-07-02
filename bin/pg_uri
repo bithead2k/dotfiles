@@ -1,0 +1,22 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: pg_uri
+# 
+#         USAGE: ./pg_uri 
+# 
+#   DESCRIPTION: given a file on the command line with connection info, make a uri
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk@webfinish.com
+#  ORGANIZATION: 
+#       CREATED: 03/24/2017 13:22
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+j2 ~/bin/pg_uri.j2 $1 | tee /dev/tty | pbcopy

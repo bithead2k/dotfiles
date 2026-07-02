@@ -1,0 +1,2 @@
+#!/bin/bash
+curl -s https://ftp.postgresql.org/pub/latest/ | grep "^<a" | sed 's/^.*postgresql-//' | grep -v "docs" | sed 's/\.tar.*//' | sort | uniq

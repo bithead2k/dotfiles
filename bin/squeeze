@@ -1,0 +1,17 @@
+#!/bin/bash
+files=$(ls -1 *.JPG | sort)
+IFS=$'\n'
+for fn in $files
+do
+	(( i++ ))
+	mv $fn IMG_$(printf '%04i' $i).JPG
+done
+files=$(ls -1 *.MOV | sort)
+i=0
+IFS=$'\n'
+for fn in $files
+do
+	(( i++ ))
+	mv $fn MVI_$(printf '%04i' $i).MOV
+done
+

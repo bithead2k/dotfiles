@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VAULT_DIR="${1:-$HOME/Documents/notes/people}"
+
+get_clipboard() {
+  if command -v wl-paste >/dev/null 2>&1; then
+    wl-paste
+  elif command -v xclip >/dev/null 2>&1; then
+    xclip -selection clipboard -o
+  elif command -v xsel >/dev/null 2>&1; then
+    xsel --clipboard --output
+  elif command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -Command 'Get-Clipboard' | sed 's/\r$//'
+  else
+    echo "No clipboard tool found: install wl-paste, xclip, or xsel." >&2
+    exit 1
+  fi
+}
+
+clean_value() {
+  sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' <<< "$1"
+}
+
+field() {
+  local name="$1"
+  awk -v n="$name" '
+    $0 ~ "^" n ":" {
+      sub("^" n ":[[:space:]]*", "")
+      print
+      exit
+    }
+  ' <<< "$CLIP"
+}
+
+title_case_name() {
+  awk -F, '{
+    last=tolower($1)
+    first=tolower($2)
+    for (i=1;i<=NF;i++) {}
+    cmd = "python3 - <<PY\ns=" q last ", " first q "\nprint(s.title())\nPY"
+  }'
+}
+
+make_title() {
+  python3 - "$1" <<'PY'
+import sys
+raw = sys.argv[1].strip()
+if "," in raw:
+    last, rest = raw.split(",", 1)
+    out = f"{last.strip().title()}, {rest.strip().title()}"
+else:
+    out = raw.title()
+print(out)
+PY
+}
+
+markdown_table_row() {
+  local field value
+
+  field="$(printf '%s' "$1" | tr -d '\r')"
+  value="$(printf '%s' "$2" | tr -d '\r')"
+
+  printf '| %s | %s |\n' "$field" "$value"
+
+}
+
+CLIP="$(get_clipboard)"
+
+sid="$(clean_value "$(field 'SID Number')")"
+tdcj="$(clean_value "$(field 'TDCJ Number')")"
+name_raw="$(clean_value "$(field 'Name')")"
+given_names="$(awk -F, '{print $2}' <<< "$name_raw" | xargs | sed 's/.*/\L&/' | sed 's/\b\(.\)/\u\1/g')"
+last_name="$(awk -F, '{print $1}' <<< "$name_raw" | xargs | sed 's/.*/\L&/' | sed 's/\b\(.\)/\u\1/g')"
+first_name="$(awk -F' ' '{print $1}' <<< "$given_names" | xargs | sed 's/.*/\L&/' | sed 's/\b\(.\)/\u\1/g')"
+middle_name="$(awk -F' ' '{print $2}' <<< "$given_names" | xargs | sed 's/.*/\L&/' | sed 's/\b\(.\)/\u\1/g')"
+case "$middle_name" in
+	"$first_name"|"$last_name") middle_name=;;
+	*);;
+esac
+race="$(clean_value "$(field 'Race')")"
+gender="$(clean_value "$(field 'Gender')")"
+age="$(clean_value "$(field 'Age')")"
+max_date="$(clean_value "$(field 'Maximum Sentence Date')")"
+facility="$(clean_value "$(field 'Current Facility')")"
+proj_release="$(clean_value "$(field 'Projected Release Date')")"
+parole_date="$(clean_value "$(field 'Parole Eligibility Date')")"
+visitation="$(clean_value "$(field 'Inmate Visitation Eligible')")"
+
+if [[ -z "$name_raw" || -z "$sid" || -z "$tdcj" ]]; then
+  echo "Could not parse required fields: Name, SID, or TDCJ." >&2
+  exit 1
+fi
+
+note_title="$(make_title "$first_name $last_name")"
+safe_file="$note_title.md"
+out="$VAULT_DIR/$safe_file"
+
+mkdir -p "$VAULT_DIR"
+
+offenses="$(
+awk '
+  BEGIN { in_table=0 }
+  /^Offense Date[[:space:]]+Offense[[:space:]]+Sentence Date/ {
+    in_table=1
+    next
+  }
+  in_table && /^Return to Search Results/ { exit }
+  in_table && NF {
+    print
+  }
+' <<< "$CLIP"
+)"
+
+[[ -f "$out" ]] && { echo "File $out already exists." >&2; exit 1; }
+
+{
+cat <<EOF
+---
+full_name: "$note_title"
+nickname:
+first_name: "$first_name"
+middle_name: "$middle_name"
+last_name: "$last_name"
+tdcj: "$tdcj"
+sid: "$sid"
+race: "$race"
+gender: "$gender"
+age: $age
+facility: "$facility"
+projected_release_date: "$proj_release"
+parole_eligibility_date: "$parole_date"
+visitation_eligible: "$visitation"
+tags:
+  - convicts
+---
+
+![|250]()
+
+\`\`\`dataview
+TABLE WITHOUT ID file.name as "full name", nickname, tdcj, sid
+FROM "people"
+WHERE file.name = this.file.name
+\`\`\`
+
+# Inmate Information Details
+
+SID Number: $sid
+
+TDCJ Number: $tdcj
+
+| Field | Value |
+| ----- | ----- |
+EOF
+
+markdown_table_row "Name" "$note_title"
+markdown_table_row "Race" "$race"
+markdown_table_row "Gender" "$gender"
+markdown_table_row "Age" "$age"
+markdown_table_row "Maximum Sentence Date" "$max_date"
+markdown_table_row "Current Facility" "$facility"
+markdown_table_row "Projected Release Date" "$proj_release"
+markdown_table_row "Parole Eligibility Date" "$parole_date"
+markdown_table_row "Inmate Visitation Eligible" "$visitation"
+
+cat <<EOF
+
+**Scheduled Release Date:**  
+Inmate is not scheduled for release at this time.
+
+**Scheduled Release Type:**  
+Will be determined when release date is scheduled.
+
+**Scheduled Release Location:**  
+Will be determined when release date is scheduled.
+
+[Parole Review Information](https://inmate.tdcj.texas.gov/InmateSearch/reviewDetail.action?sid=$sid&tdcj=$tdcj)
+
+### Offense History:
+
+| Offense Date | Offense | Sentence Date | County | Case No. | Sentence (YY-MM-DD) |
+| ------------ | ------- | ------------- | ------ | -------- | ------------------- |
+EOF
+ 
+
+while IFS=$'\t' read -r od offense sd county case_no sentence; do
+  [[ -z "${od:-}" ]] && continue
+  printf '| %s | %s | %s | %s | %s | %s |\n' \
+    "$od" "$offense" "$sd" "$county" "$case_no" "$sentence" | tr -d '\r'
+done <<< "$offenses"
+
+} > "$out"
+
+echo "Created: $out"

@@ -1,0 +1,34 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  nmd
+# 
+#         USAGE:  ./nmd 
+# 
+#   DESCRIPTION:  New Markdown File
+#       Create a new markdown file with the right perms and open it
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  03/23/2026 09:41:57 AM CDT
+#      REVISION:  ---
+#===============================================================================
+
+function die() {
+
+    retval=$1
+    shift
+    echo "$@" >&2
+    exit $retval
+
+}
+
+[[ -f "$1".md ]] || [[ -f "$1".markdown ]] && die 1 "File already exists."
+
+echo -e "---\n\n\n---\n\n" > "$1.md"
+nvim "$1.md"

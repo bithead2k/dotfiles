@@ -1,0 +1,43 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  newpost
+# 
+#         USAGE:  ./newpost 
+# 
+#   DESCRIPTION:  Create a new Jekyll blog post
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  10/04/2023 05:50:42 PM CDT
+#      REVISION:  ---
+#===============================================================================
+
+function clean_name() {
+    sed -e 's/ /-/g' -e 's/(/\\(/g' -e 's/)/\\)/g'
+}
+
+postdir=~/play/jekyll/_posts/
+postname="$(date +'%F')-$(echo ${@} | clean_name).md"
+postfqdn=${postdir}${postname}
+
+cat <<EOF | tee -a $postfqdn
+---
+layout: post
+title:  ${@}
+date:   $(date +'%F %T')
+categories: postgresql
+---
+
+# ${@}
+
+EOF
+
+echo "$postfqdn"
+
+gvim "$postname"

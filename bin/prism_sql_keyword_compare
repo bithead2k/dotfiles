@@ -1,0 +1,67 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  prism_sql_keyword_compare
+# 
+#         USAGE:  ./prism_sql_keyword_compare 
+# 
+#   DESCRIPTION:  Compare the keywords in the prism source code#      to 
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  02/23/2023 10:13:45 PM CST
+#      REVISION:  ---
+#  ANALYSE AND ARRAY BOTH CAST DEFERRABLE FALSE IN INITIALLY LATERAL LEADING NULL OR PLACING SYMMETRIC TRAILING TRUE VARIADIC WINDOW
+#===============================================================================
+codedir=/home/kroybal/work/obsidian/prism/tests/languages/sql
+lastwordline=0
+
+function die(){
+
+    retval=$1
+    shift
+    echo -e "$@"
+    exit $1
+}
+
+function concat_ws(){
+# Thanks, SO.  https://stackoverflow.com/questions/1527049/how-can-i-join-elements-of-an-array-in-bash
+  local d=${1-} f=${2-}
+  if shift 2; then
+    printf %s "$f" "${@/#/$d}"
+  fi
+}
+cd $codedir || die1 "Couldn't find directory $codedir"
+lastwordline=$(grep -n "^YEAR" keyword_feature.test | sed -e 's/:.*//')
+(( lastwordline++ ))
+prism_keywords=$(cat keyword_feature.test | sed "$lastwordline,\$d")
+sql_keywords=$(psql -qtAc "SELECT upper(word) FROM pg_get_keywords() WHERE catdesc = 'reserved';")
+
+for keyword in ${prism_keywords[@]}
+do
+    keyword=$(echo "$keyword" | sed -e 's/[^[:print:]]*//g')
+    sql_keywords=$(echo -e "$sql_keywords" | 
+        sed "/^$keyword/d")
+    # [[ $keyword == "ALL" ]] && exit
+done
+
+sql_keywords=$(echo -e ${sql_keywords[@]} | sed 's/ /\n/g' )
+sql_merged=$(echo -ne "${prism_keywords}\n${sql_keywords}" | sort | sed -e 's/[[:space:]]*//g')
+
+echo -e "$sql_merged"
+echo ""
+echo "----------------------------------------------------"
+echo ""
+echo "["
+echo -e "$sql_merged" | sed -e 's/^/     ["keyword", "/' \
+    -e '1,$s/$/"],/' -e '$s/,$//'
+echo "]"
+echo ""
+echo "----------------------------------------------------"
+echo ""
+echo "Checks for all keywords."

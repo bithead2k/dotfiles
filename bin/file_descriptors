@@ -1,0 +1,45 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: file_descriptors
+# 
+#         USAGE: ./file_descriptors 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 07/30/2018 14:40
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+echo "There is the systems total file descriptor limit, what do you get from the command:"
+
+echo "sysctl fs.file-nr" 
+
+echo "This returns counts of file descriptors:"
+
+echo "<in_use> <unused_but_allocated> <maximum>"
+echo "To find out what a users file descriptor limit is run the commands:"
+
+echo "sudo su - <username>"
+echo "ulimit -Hn"
+echo "To find out how many file descriptors are in use by a user run the command:"
+
+echo "sudo lsof -u <username> 2>/dev/null | wc -l"
+
+echo "So now if you are having a system file descriptor limit issue you will need to edit your /etc/sysctl.conf file and add, or modify it it already exists, a line with fs.file-max and set it to a value large enough to deal with the number of file descriptors you need and reboot."
+
+echo "fs.file-max = 204708"
+
+echo "Another possibility is too many threads. We just ran into this error message when running a test harness against an app that uses a thread pool. We used"
+
+echo 'watch -n 5 -d "ps -eL <java_pid> | wc -l"'
+
+echo "to watch the ongoing count of Linux native threads running within the given Java process ID. After this hit about 1,000 (for us--YMMV), we started getting the error message you mention."

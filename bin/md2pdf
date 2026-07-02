@@ -1,0 +1,97 @@
+#!/bin/bash
+# Original script was one line:
+#pandoc --pdf-engine=wkhtmltopdf "$1" -o "${1//md/pdf}"
+# set -x
+
+[[ $# -eq 0 ]] && {
+   
+    echo "Usage:"
+    echo "${0##/} <markdown_file>"
+    exit 1
+
+}
+
+target="${1//md/pdf}"
+parsed="${1//md/tmp.md}"
+
+cp "${1}" "${parsed}"
+
+# weird shit to fix links in the pdf
+sed -i -e "s/]]/]]\n/g" "${parsed}"
+perl -p -i -e 's/\[\[([^|\]]+)\|([^\]]+)\]\]/[$2]($1.pdf)/g; s/\[\[([^\]]+)\]\]/[$1]($1.pdf)/g' "${parsed}"
+# sed -i -e "s/]]\n/]]/g" "${parsed}"
+
+# Make an html doc first, then use html to pdf for better rendering
+pandoc \
+    --pdf-engine=xelatex \
+    -V 'mainfont:DejaVuSerif' \
+    -V 'mainfontoptions:Extension=.ttf, UprightFont=*, BoldFont=*-Bold, ItalicFont=*-Italic, BoldItalicFont=*-BoldItalic' \
+    -V 'sansfont:DejaVuSans.ttf' \
+    -V 'monofont:DejaVuSansMono.ttf' \
+    -V "geometry:margin=1in" \
+    -o "${target}.html" "${parsed}" -css=$(basename "$0")/tables.css
+
+# echo brave --headless --print-to-pdf="${target}"  --print-to-pdf-settings="$(dirname $0)/md2pdf.json" "${target}.html"
+#/usr/bin/brave-browser --headless --print-to-pdf="${target}"  \
+#   --no-margins \
+#   --print-to-pdf-no-header \
+#   --virtual-time-budget=10000 \
+#   "${target}.html"
+
+cat > ./md2pdf.js.jinja2 <<-EOF
+const puppeteer = require('puppeteer');
+
+const cleanEnv = { ...process.env }; 
+delete cleanEnv.XDG_CURRENT_DESKTOP;
+delete cleanEnv.KDE_FULL_SESSION;
+delete cleanEnv.QT_PLUGIN_PATH;
+delete cleanEnv.QT_QPA_PLATFORMTHEME;
+
+(async () => {
+  const browser = await puppeteer.launch({
+    executablePath: '/usr/bin/brave-browser',
+    env: cleanEnv,
+    headless: true,
+    stdio: 'inherit'
+  });
+  const page = await browser.newPage();
+  await page.goto('file://{{source}}', { waitUntil: 'networkidle2' });
+  await page.pdf({
+    path: '{{target}}',
+    printBackground: true,
+    displayHeaderFooter: false,
+    margin: { top: 0, bottom: 0, left: 0, right: 0 }
+  });
+  await browser.close();
+})();
+EOF
+
+cat <<-EOF > md2pdf.json
+{
+    "source": "$(pwd)/${target}.html",
+    "target": "${target}"
+}
+EOF
+
+j2 -f json ./md2pdf.js.jinja2 ./md2pdf.json  > ./md2pdf.js
+
+# Supress QT KDE desktop messages by pretending we have no style.
+export QT_STYLE_OVERRIDE=Fusion
+export QT_QPA_PLATFORMTHEME=gtk3
+# export LD_PRELOAD=/dev/null
+
+  node md2pdf.js "$SOURCE_ABS" "$TARGET_ABS"
+
+#pandoc \
+#    --pdf-engine=xelatex \
+#    -o "${target}" "${target}.html" -css=tables.css
+#
+
+[[ -f "${parsed}" ]] && rm "${parsed}"
+[[ -f "${target}.html" ]] && rm "${target}.html"
+[[ -f "md2pdf.js" ]] && rm "md2pdf.js"
+[[ -f "md2pdf.json" ]] && rm "md2pdf.json"
+[[ -f "md2pdf.js.jinja2" ]] && rm "md2pdf.js.jinja2"
+
+env -u XDG_CURRENT_DESKTOP -u KDE_FULL_SESSION \
+open "${target}"

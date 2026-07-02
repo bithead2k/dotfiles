@@ -1,0 +1,23 @@
+[user]
+	email = kirk.roybal@gmail.com
+	name = bithead2k
+[credential "https://github.com"]
+	helper = 
+	helper = !/usr/bin/gh auth git-credential
+[pull]
+    rebase = false
+
+[core]
+     pager = delta
+
+[interctive]
+     diffFilter = delta --colour-only
+
+[delta]
+    navigate = true
+
+[merge]
+    conflictstyle = diff3
+
+[diff]
+    colorMoved = default

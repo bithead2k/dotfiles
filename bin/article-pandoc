@@ -1,0 +1,64 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  article-pandoc
+# 
+#         USAGE:  ./article-pandoc 
+# 
+#   DESCRIPTION:  Compile an article stub into a pdf, print it and delete the
+#   evidence.
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/11/2023 09:54:20 AM CST
+#      REVISION:  ---
+#===============================================================================
+function die(){
+    retval=$1
+    shift
+    echo -e "$@"
+    exit $retval
+}
+
+clean_output() {
+    grep -v 'openBinaryFile: does not exist'
+    grep -v 'pandoc 2.9.2.1'
+	grep -v 'Compiled with pandoc-types 1.20, texmath 0.12.0.2, skylighting 0.8.5'
+	grep -v 'Default user data directory: /home/kroybal/.local/share/pandoc or /home/kroybal/.pandoc'
+	grep -v 'Copyright (C) 2006-2020 John MacFarlane'
+	grep -v 'Web:  https://pandoc.org'
+	grep -v 'This is free software; see the source for copying conditions.'
+	grep -v 'There is no warranty, not even for merchantability or fitness'
+	grep -v 'for a particular purpose.'
+}
+
+articledir=~/Documents/notes/articles/
+pushd ${articledir} > /dev/null 2>&1 || die 2 "Couldn't change to $articledir directory."
+popd > /dev/null 2>&1 
+
+[[ "$1" == "" ]] || {
+    articlefile="$1"
+    [[ ! -f "$articlefile" ]] && die 2 "Couldn't find file $articlefile"
+    commando="pandoc --quiet -s --pdf-engine=xelatex -o '${articlefile//.md/.pdf}' '${articlefile}' 2>&1 | clean_output"
+    # echo $commando
+    eval $commando
+    exit
+}
+
+for ((i=1;i<=10;i++))
+do
+    articlefile="${articledir}article_$(date +"%Y_%m_%d")_$(printf '%02i' $i).md" 
+    [[ ! -f "$articlefile" ]] && exit  # ran out of files for today
+    commando="pandoc --quiet -s --pdf-engine=xelatex -o '${articlefile//.md/.pdf}' '${articlefile}' 2>&1 | clean_output"
+    # echo $commando
+    eval $commando
+done
+
+# explicitly blow off 
+# any return value from pandoc
+exit

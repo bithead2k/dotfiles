@@ -1,0 +1,11 @@
+#!/bin/bash
+pics=$(ls -1 IMG_*.JPG)
+IFS=$'\n'
+for pic in $(echo -e "$pics")
+do
+	caption=$(exiftool -Caption $pic)
+	echo "$pic : $caption"
+	unset REPLY
+	read -ep "Caption: "
+	[[ -z $REPLY ]] || exiftool -overwrite_original_in_place -Caption="$REPLY" "$pic"
+done

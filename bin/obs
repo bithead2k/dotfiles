@@ -1,0 +1,4 @@
+#!/bin/bash
+#QT_SCALE_FACTOR=2 
+. ~/bin/reset_obs
+/usr/bin/obs

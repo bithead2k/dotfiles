@@ -1,0 +1,31 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: top_branches
+# 
+#         USAGE: ./top_branches 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 08/26/2016 10:29
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+pushd ~/source >/dev/null
+for repo in $(find -maxdepth 1 | grep trsrc )
+do
+   pushd $repo >/dev/null
+   echo ${repo//.*-/}
+   svn info | grep URL
+   popd >/dev/null
+done
+
+popd > /dev/null

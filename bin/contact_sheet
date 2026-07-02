@@ -1,0 +1,38 @@
+#!/bin/bash
+outfile=$1
+cols=4
+cat <<EOF>$outfile
+<HTML>
+<HEAD>
+<TITLE>$(date '+%Y-%m-%d')</TITLE>
+</HEAD>
+<BODY>
+<CENTER><H1>$(date '+%Y-%m-%d')</H1></CENTER>
+<TABLE>
+EOF
+col=1
+last=$(ls -1 IMG_* | sort | tail -n 1 | sed -e 's/[^[:digit:]]//g' -e 's/^0*//')
+for ((i=1;i<=$last;i++))
+do
+	[[ $col -eq 1 ]] && echo "<TR>" >> $outfile
+	num=$(printf '%04i' $i)
+	caption=$(exiftool -Caption IMG_$num.JPG | sed -e 's/.*: //')
+	echo "<TD><a href=\"IMG_$num.JPG\"><img src=\"THUMB_$num.JPG\"/><br/><center>$caption</center></a></TD>" >> $outfile
+
+	[[ $col -eq $cols ]] && {
+		echo "</TR>" >> $outfile
+		col=0
+		}
+	(( col++ ))
+done
+[[ $col -eq 1 ]] ||
+for ((i=$col;i<=$cols;i++))
+do
+	echo "<TD></TD>" >> $outfile
+	[[ $i -eq $cols ]] && echo "</TR>" >> $outfile
+done
+cat <<EOF>>$outfile
+</TABLE>
+</BODY>
+</HTML>
+EOF

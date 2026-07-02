@@ -1,0 +1,108 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: print_loop
+# 
+#         USAGE: ./print_loop 
+# 
+#   DESCRIPTION: Given a directory of files produced by ~/bin/prepare, 
+#                loop through the files, printing 2 sided long edge.
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 10/12/2018 10:45
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+
+
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -b|begin n    Starting integer to print, derault 1
+  -c|copies n   Number of duplicates per page, default 2
+  -e|end   n    Ending integer to print, default 1
+  -d|delay s    Delay in seconds between prints, default 55s
+  -l|log        Turn on bash debugging, default off
+  -h|help       Display this message
+  -v|version    Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+
+die () {
+    echo -en "$2"
+    exit $1
+}
+
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+begin=1
+delay=0
+end=1
+copies=2
+profile=$(pwd | sed -e 's_^.*/__' -e 's/_print$//')
+
+while getopts ":b:c:e:d:hlv" opt
+do
+  case $opt in
+
+    b|begin    )  begin=$OPTARG;;
+
+    c|copies   )  copies=$OPTARG;;
+
+    e|end      )  end=$OPTARG;;
+
+    d|delay    )  delay=$OPTARG;;
+
+    h|help     )  usage; exit 0   ;;
+
+    l|log      )  set -x;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+[[ $begin -gt $end ]] && die 1 "Starting point is greater than ending point"
+
+for ((i=begin;i<=end;i=i+2))
+do
+    filename=${profile}_pair_$(printf '%03i' $i).pdf
+    [[ -f $filename ]] || die 1 "File not found $filename"
+    lpr -o raw -o sides=two-sided-long-edge -# $copies $filename
+    echo -en "$i"
+    while [[ $(lpstat) != "" ]]
+    do
+        echo -en "."
+        sleep 1
+        job_count=$(lpq | wc -l)
+        [[ $job_count -gt 3 ]] && lprm $(lpq | sed -n '3p' | cut -f 4)
+    done
+    echo ""
+    [[ $delay -gt 0 ]] && sleep $delay
+done

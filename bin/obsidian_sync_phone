@@ -1,0 +1,44 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  obsidian_sync_phone
+# 
+#         USAGE:  ./obsidian_sync_phone 
+# 
+#   DESCRIPTION:  https://ptspts.blogspot.com/2015/03/how-to-use-rsync-over-adb-on-android.html
+#   Termux:
+#   pkg install openssh 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  03/02/2023 02:55:08 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+function phip() {
+
+    adb shell ifconfig | grep "inet addr" | grep Bcast | sed -e "s/^.*addr://" -e "s/ .*$//"
+
+}
+0-
+# remoteip=$(phip)
+
+pushd ~/Documents/notes/ 2>&1 >/dev/null
+adb forward --remove-all
+#adb forward tcp:6010 tcp:1873
+adb forward tcp:8022 tcp:8022
+# adb push ~/work/obsidian/rsync/rsync.bin /data/local/tmp/rsync
+# adb shell chmod 755 /data/local/tmp/rsync
+#adb shell /data/local/tmp/rsync --daemon --no-detach --config=/sdcard/rsyncd.conf --log-file=/proc/self/fd/2 &
+#adb shell '/data/local/tmp/rsync --daemon --config=/sdcard/rsyncd.conf --log-file=/data/local/tmp/foo &'
+#rsync -avz --progress --stats . rsync://localhost:6010/root/storage/emulated/0/Documents/notes
+#rsync -avz --progress --stats rsync://localhost:6010/root/storage/emulated/0/Documents/notes/* .
+ssh-copy-id -p 8022 root@localhost
+rsync --progress --stats -avze 'ssh -p 8022' $(pwd) root@localhost:Documents/
+cd ..
+rsync --progress --stats -avze 'ssh -p 8022' root@localhost:Documents/notes/ $(pwd)
+popd

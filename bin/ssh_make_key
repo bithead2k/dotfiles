@@ -1,0 +1,2 @@
+#!/bin/bash
+ssh-keygen -t rsa -q -N '' -f ~/.ssh/id_rsa -b 4096

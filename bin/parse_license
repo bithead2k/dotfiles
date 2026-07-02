@@ -1,0 +1,356 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+#===============================================================================
+#
+#          FILE:  parse_license
+#
+#         USAGE:  get_ham KJ5PRQ | parse_license
+#                 parse_license              # falls back to clipboard
+#
+#   DESCRIPTION:  Parse ham license text and surgically update/create an
+#                 Obsidian people note.
+#
+#===============================================================================
+
+DEBUG=${DEBUG:-0}
+OBSIDIAN="${OBSIDIAN:-${Obsidian:-$HOME/Documents/notes}}"
+TEMPLATE="${TEMPLATE:-$OBSIDIAN/templates/New Person.md}"
+OUTPUT_DIR="${OUTPUT_DIR:-$OBSIDIAN/people}"
+
+[[ $DEBUG -gt 1 ]] && set -x
+
+read_input() {
+    local input=""
+
+    if [[ ! -t 0 ]]; then
+        input="$(cat)"
+    fi
+
+    if [[ -z "${input//[[:space:]]/}" ]]; then
+        if command -v xclip >/dev/null 2>&1; then
+            input="$(xclip -o -selection clipboard)"
+        elif command -v termux-clipboard-get >/dev/null 2>&1; then
+            input="$(termux-clipboard-get)"
+        else
+            echo "Error: stdin is empty and no clipboard reader found" >&2
+            exit 1
+        fi
+    fi
+
+    if [[ -z "${input//[[:space:]]/}" ]]; then
+        echo "Error: no license text found on stdin or clipboard" >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$input"
+}
+
+contact="$(read_input)"
+
+tmp_contact="$(mktemp)"
+trap 'rm -f "$tmp_contact"' EXIT
+printf '%s\n' "$contact" > "$tmp_contact"
+
+python3 - "$TEMPLATE" "$OUTPUT_DIR" "$DEBUG" "$tmp_contact" <<'PY'
+import re
+import sys
+from datetime import date
+from pathlib import Path
+
+TEMPLATE = Path(sys.argv[1]).expanduser()
+OUTPUT_DIR = Path(sys.argv[2]).expanduser()
+DEBUG = int(sys.argv[3])
+RAW = Path(sys.argv[4]).read_text(errors="ignore")
+
+HAM_KEYS = [
+    "call sign",
+    "ATTN",
+    "Licensee ID",
+    "License Class",
+    "FRN",
+    "Radio Service",
+    "Issue Date",
+    "Expire Date",
+    "Date of Last Change",
+]
+
+BASE_ORDER = [
+    "first_name",
+    "middle_name",
+    "last_name",
+    "street",
+    "city",
+    "state",
+    "country",
+    "zip",
+    "phone",
+    "home_email",
+    "work_email",
+    "birthday",
+    "title",
+    "tags",
+    "company",
+    "date",
+]
+
+DEFAULT_BODY = """![|250]()
+
+```dataview
+TABLE WITHOUT ID file.name as "full name", title, phone, work_email
+FROM "people"
+WHERE file.name = this.file.name
+```
+"""
+
+
+def die(msg, rc=1):
+    print(f"Error: {msg}", file=sys.stderr)
+    raise SystemExit(rc)
+
+
+def clean(value):
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def title_case_name(value):
+    return " ".join(part[:1].upper() + part[1:].lower() for part in value.split())
+
+
+def safe_filename(name):
+    name = re.sub(r'[\\/:*?"<>|]', "", name).strip()
+    return name or "Unknown"
+
+
+def yaml_scalar(value):
+    if value is None:
+        return ""
+    value = str(value)
+    if "\n" in value:
+        return value.rstrip()
+    return value.strip()
+
+
+def parse_frontmatter(text):
+    m = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
+    if not m:
+        return {}, [], text
+
+    fm_text = m.group(1)
+    body = text[m.end():]
+    data = {}
+    order = []
+    current_key = None
+
+    for line in fm_text.splitlines():
+        if not line.strip():
+            continue
+
+        if line.startswith((" ", "\t")) and current_key:
+            data[current_key] = (data.get(current_key, "") + "\n" + line.rstrip()).strip("\n")
+            continue
+
+        if ":" not in line:
+            continue
+
+        key, value = line.split(":", 1)
+        key = key.strip()
+        data[key] = value.strip()
+        order.append(key)
+        current_key = key
+
+    return data, order, body
+
+
+def render_frontmatter(data, order):
+    seen = set()
+    lines = ["---"]
+
+    for key in order:
+        if key not in data or key in seen:
+            continue
+        value = yaml_scalar(data.get(key, ""))
+        if "\n" in value:
+            lines.append(f"{key}:")
+            lines.extend(value.splitlines())
+        else:
+            lines.append(f"{key}: {value}")
+        seen.add(key)
+
+    for key, value in data.items():
+        if key in seen:
+            continue
+        value = yaml_scalar(value)
+        if "\n" in value:
+            lines.append(f"{key}:")
+            lines.extend(value.splitlines())
+        else:
+            lines.append(f"{key}: {value}")
+
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def ensure_tag(existing_value, tag):
+    existing_value = "" if existing_value is None else str(existing_value).rstrip()
+
+    if not existing_value.strip():
+        return tag
+
+    lines = existing_value.splitlines()
+
+    if len(lines) > 1 or any(line.lstrip().startswith("-") for line in lines):
+        items = []
+        for line in lines:
+            item = re.sub(r"^\s*-\s*", "", line).strip()
+            if item:
+                items.append(item)
+        if tag not in items:
+            items.append(tag)
+        return "\n".join(f"  - {item}" for item in items)
+
+    parts = [p.strip() for p in re.split(r"\s*,\s*", existing_value.strip()) if p.strip()]
+    if tag not in parts:
+        parts.append(tag)
+    return ", ".join(parts)
+
+
+def parse_license_text(raw):
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        die("empty license text")
+
+    first_line = lines[0]
+    pieces = [clean(p) for p in first_line.split(",")]
+    if len(pieces) < 3:
+        die(f"first line does not look like 'LAST, First, CALL': {first_line!r}")
+
+    last_name = pieces[0]
+    first_name = pieces[1]
+    call_sign = pieces[2]
+
+    detail_lines = lines[1:]
+    address_lines = [line for line in detail_lines if ":" not in line]
+    keyed_lines = [line for line in detail_lines if ":" in line]
+
+    street = address_lines[0] if address_lines else ""
+    city = state = zip_code = ""
+
+    if len(address_lines) >= 2:
+        m = re.match(r"^(.*?),\s*([A-Z]{2})\s+([0-9]{5}(?:-?[0-9]{4})?)$", address_lines[-1])
+        if m:
+            city = clean(m.group(1))
+            state = clean(m.group(2))
+            zip_raw = clean(m.group(3))
+            if re.fullmatch(r"[0-9]{9}", zip_raw):
+                zip_code = f"{zip_raw[:5]}-{zip_raw[5:]}"
+            else:
+                zip_code = zip_raw
+
+    keyed = {}
+    for line in keyed_lines:
+        key, value = line.split(":", 1)
+        keyed[clean(key)] = clean(value)
+
+    return {
+        "first_name": first_name,
+        "middle_name": "",
+        "last_name": last_name,
+        "street": street,
+        "city": city,
+        "state": state,
+        "country": "USA",
+        "zip": zip_code,
+        "company": "",
+        "date": date.today().isoformat(),
+        "tags": "Ham",
+        "call sign": call_sign,
+        "ATTN": f"{title_case_name(first_name)} {title_case_name(last_name)}".strip(),
+        **keyed,
+    }
+
+
+def load_template():
+    if TEMPLATE.exists():
+        text = TEMPLATE.read_text(errors="ignore")
+        data, order, body = parse_frontmatter(text)
+        return data, order, body or DEFAULT_BODY
+
+    data = {key: "" for key in BASE_ORDER}
+    return data, BASE_ORDER[:], DEFAULT_BODY
+
+
+def apply_surgical_merge(existing_data, incoming, *, is_new):
+    merged = dict(existing_data)
+
+    if is_new:
+        # On create, template tags/company are defaults for ordinary people
+        # pages, not license-import data.  Strip them before merging.
+        merged.pop("tags", None)
+        merged.pop("company", None)
+
+    for key, value in incoming.items():
+        value = yaml_scalar(value)
+
+        if key == "tags":
+            if is_new:
+                merged[key] = value or "Ham"
+            else:
+                merged[key] = ensure_tag(merged.get(key, ""), value or "Ham")
+            continue
+
+        if key == "company" and is_new:
+            merged[key] = ""
+            continue
+
+        # Blank input is not data. Never erase a populated field accidentally.
+        if not value:
+            if key not in merged:
+                merged[key] = ""
+            continue
+
+        if is_new:
+            # New page: license import populates the page.
+            merged[key] = value
+        else:
+            # Existing page: fill blanks only.  Do not overwrite populated YAML.
+            if not yaml_scalar(merged.get(key, "")):
+                merged[key] = value
+
+    if is_new:
+        # Belt-and-suspenders: enforce these after the merge so the template
+        # cannot leak DRW/People/company defaults into a created license page.
+        merged["tags"] = "Ham"
+        merged["company"] = ""
+
+    return merged
+
+
+incoming = parse_license_text(RAW)
+filename_first = title_case_name(incoming["first_name"].split()[0]) if incoming["first_name"].split() else ""
+full_name = f"{filename_first} {title_case_name(incoming['last_name'])}".strip()
+outfile = OUTPUT_DIR / f"{safe_filename(full_name)}.md"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+if outfile.exists():
+    old_text = outfile.read_text(errors="ignore")
+    old_data, old_order, body = parse_frontmatter(old_text)
+    data = apply_surgical_merge(old_data, incoming, is_new=False)
+    order = old_order[:]
+else:
+    template_data, template_order, body = load_template()
+    data = apply_surgical_merge(template_data, incoming, is_new=True)
+    order = template_order[:]
+
+for key in BASE_ORDER + HAM_KEYS:
+    if key not in order:
+        order.append(key)
+
+outfile.write_text(render_frontmatter(data, order) + body)
+
+if DEBUG:
+    print(f"Wrote {outfile}", file=sys.stderr)
+
+print(outfile)
+PY

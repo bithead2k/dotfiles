@@ -1,0 +1,31 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: psql2htm
+# 
+#         USAGE: ./psql2htm 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (DBA), kroybal@linkedin.com
+#  ORGANIZATION: HR IT
+#       CREATED: 08/19/2015 14:10
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+/opt/local/bin/gsed 2>/dev/null && 
+    mysed=/opt/local/bin/gsed || 
+    mysed=$(which sed)
+
+$mysed 	-e 's/<table border="1"/<table style="font-family: ''Trebuchet MS'',Arial,Helvetica,sans-serif; width: 100%; border-collapse: collapse; margin-bottom: 12px; border-spacing: 0px; box-sizing: border-box;" /g' |
+$mysed	-e '/<tr valign="top">/{:a;N;/valign="top".*valign="top"/!Ta;s/valign="top"/style="background-color: #EAF2D3;"/2;}' |
+$mysed	-e '/<tr valign="top">/s/valign="top"/style="background-color: #FFFFFF;"/g' |
+$mysed	-e '/<tr>/s/<tr>/<tr style="font-size: 1.4em; text-align: left; background-color: #A7C942; color: #FFFFFF; border: 1px solid #98BF21; ">/g' |
+$mysed	-e 's/<td align/<td style="font-size: 1.2em; border: 1px solid #98BF21;" align/g' |
+$mysed	-e '/<p>([[:digit:]]* .*)<br \/>/d' |
+$mysed	-e '/<\/p>/d'

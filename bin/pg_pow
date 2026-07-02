@@ -1,0 +1,30 @@
+#!/bin/bash
+set -x
+#Attempt to get the PostgreSQL Person of the Week from Andreas Sherbaum
+newperson=${*:-$(xclip -o)} # from the command line or the clipboard
+person=${newperson,,}  # bash lowercase
+person=${person// /_}  # spaces to underscores
+person=$(echo $person | recode -f utf8..flat)
+wget https://postgresql.life/post/${person}/ -q -O- |
+    sed -e 's/<h3 /\n<h3 /g' -e 's/class=slonik-with-text/\n/g' |
+    sed -e '1,/Read all interviews/d' -e '/elephant_03/,$d' | 
+    sed -e 's_img src=/images_img src=http://postgresql.life/images_g' |
+    xclip -selection clipboard -t text/html
+~/bin/obsidian_cli -of "people/${newperson}"
+xdotool key Down G End A Return Return ctrl+v
+xdotool key Escape  # Command mode
+xdotool key colon g slash c o m p a n y slash s slash T i m e s c a l e slash slash Return
+# xdotool key colon
+xdotool type ':%s/i---/---/'
+xdotool key Return
+# g/^\!\[/s/\]/|250]/
+xdotool key colon g slash ^ backslash exclam backslash bracketleft slash s slash backslash bracketright slash bar 2 5 0 bracketright slash Return
+xdotool type ':g/- 🐯timescale/d'
+xdotool key Return
+# xdotool key colon Up Up Up Up Return
+xdotool key slash exclam backslash bracketleft
+xdotool type "$newperson"
+xdotool key Return
+xdotool key d d
+xdotool key slash 2 5 0 bar 2 5 0 Return Escape p Up d d
+

@@ -1,0 +1,7 @@
+#!/bin/bash
+for img in *.MOV
+do
+	ffmpeg -i "$img" -r 1 -vframes 1 thumb.JPG
+	convert -resize 320 thumb.JPG "${img//MOV/JPG}"
+	[[ -f thumb.JPG ]] && rm thumb.JPG
+done

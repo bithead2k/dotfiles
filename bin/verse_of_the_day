@@ -1,0 +1,55 @@
+#!/bin/bash
+thedate=$1
+# If given, format it correctly, if not, assume today
+[[ "$thedate" == "" ]] && 
+    thedate=$(date +"%m%d%Y") || 
+    thedate=$(date --date="$thedate" +"%m%d%Y")
+reference=$(wget -qO- verseoftheday.com/en/$thedate |  
+    sed 's/<div/\n<div/g' | 
+    grep 'class="reference"' | 
+    sed -e 's_^.*nofollow">__' -e 's/<.*$//')
+
+# 2 Corinthians 12:9
+echo "$reference"
+echo ""
+
+book1=$(echo "$reference" | 
+    sed -e 's/:.*$//' -e 's/[[:digit:][:space:]:,-]*$//')
+book=$(psql -qtAc "SELECT obsidian FROM bible_books WHERE long_name='$book1'")
+ordinal=$(psql -qtAc "SELECT ordinal FROM bible_books WHERE long_name='$book';")
+ordinal=$(printf "%02i00_${book// /_}" $ordinal)
+#  4700_2_Corinthians
+verse=$(echo "$reference" | 
+    sed -e "s/$book1//" -e 's/[[:space:]]*//g' -e 's/[[:alpha:]]*//g')
+[[ "$verse" == *":"* ]] && chapter=$(echo "$verse" | cut -d: -f1) || chapter=1
+chapter=$(printf '%03i' $chapter)
+# verse ranges be like:    2:24-25b,40-42 , 12
+#   break that into an array of reference ranges
+# 24-25
+# 40-42
+# 12
+r=($(echo "$verse" | cut -d: -f2 | 
+    sed -e 's/[[:space:]]*//g' -e 's/[,]/ /' -e 's/[[:alpha:]]*//g' ))
+rbegin=1
+rfinish=${#r[@]}  #count of references in array
+[[ $rfinish -lt $rbegin ]] && rfinish=$rbegin
+# iterate through the ranges
+for (( item=$rbegin; item<=$rfinish; item++ ))
+do
+    (( base1=item-1 ))  # array elements are 0 based
+    # now iterate through the verses in the reference range
+    range=($(echo ${r[${base1}]} | sed -e 's/-/ /g'))
+    begin=${range[0]}
+    finish=${range[1]}
+    [[ $finish -lt $begin ]] && finish=$begin
+    for (( vv=$begin;vv<=$finish;vv++ ))
+    do
+        echo "![[${ordinal}_${chapter}#Verse ${vv}]]"
+    done
+done
+
+cat - <<EOF
+<a href="http://verseoftheday.com/en/$thedate/" target="_blank">Verse of the Day</a>
+
+[http://verseoftheday.com/en/$thedate/](http://verseoftheday.com/en/$thedate/)
+EOF

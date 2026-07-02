@@ -1,0 +1,32 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: s
+# 
+#         USAGE: ./s 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 02/22/2018 11:05
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+[[ -f ~/work/sql/$1.pgsql ]] || {
+    # Use a polyglot line that 
+    # makes a function in bash, 
+    # but is a comment in SQL.
+	echo '--() { exec psql -f "$0" ; }; -- ' > ~/work/sql/$1.pgsql
+    # Empty following line
+	echo '' >> ~/work/sql/$1.pgsql
+	chmod +x ~/work/sql/$1.pgsql
+}
+
+gvim ~/work/sql/$1.pgsql

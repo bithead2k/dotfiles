@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+import sys, calendar
+from datetime import *
+
+difference = timedelta(days=int(sys.argv[1]))
+now = datetime.now(timezone.utc).astimezone()
+then = now - difference
+
+years = now.year - then.year
+months = now.month - then.month
+days = now.day - then.day
+if days < 0:
+    days += calendar.monthrange(then.year, then.month)[1]
+    months -= 1
+if months < 0:
+    months += 12
+    years -= 1
+
+print('{} year(s); {} month(s); {} day(s)'.format(years, months, days))

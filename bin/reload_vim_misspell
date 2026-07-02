@@ -1,0 +1,46 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: reload_vim_misspell
+# 
+#         USAGE: ./reload_vim_misspell 
+# 
+#   DESCRIPTION: create a vimrc file for all of the common misspellings on
+#                  Wikipedia
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 12/14/2019 21:01
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+function strip_adornment() {
+
+  sed -e 's/^.*Search">/iabbrev /' \
+  -e 's/<\/a><\/span> (/ /' -e 's/).*$//' -e 's/<a href.*">//' -e 's/<\/a>//' \
+  -e '/,/{H;d}' -e '${p;x;s/^\n//;}'
+
+}
+
+function find_multiplex() {
+  sed -e '/ .* .* .* /d'
+}
+
+function find_multiword() {
+  sed -e '/ .* .* /{H;d}' -e '${p;x;s/^\n//;}' 
+}
+
+function parse() {
+    strip_adornment | 
+        find_multiplex
+#        find_multiword
+}
+
+curl -s https://en.wikipedia.org/wiki/Wikipedia:Lists_of_common_misspellings/$1 | \
+    grep "plainlinks" | parse

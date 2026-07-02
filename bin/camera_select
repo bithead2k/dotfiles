@@ -1,0 +1,35 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  camera_select
+# 
+#         USAGE:  ./camera_select 
+# 
+#   DESCRIPTION:  Given nothing, show a list of cameras
+#                 Given a camera name, show the camera mount point
+#               (e.g.) camera_select "$(camera_select | head -n1 )"
+#                   /dev/video4
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/09/2023 05:15:02 AM CST
+#      REVISION:  ---
+#===============================================================================
+
+
+# Dummy video device (0x0000) (platform:v4l2loopback-000):
+#         /dev/video4
+# HD Pro Webcam C920 (usb-0000:09:00.3-6.3):
+#         /dev/video2
+# Aluratek UHD 4K Camera: Alurate (usb-0000:10:00.3-3):
+#         /dev/video0
+camera_list=$(v4l2-ctl  --list-devices | grep -A1 000 | sed '/--/d')
+[[ $# -eq 1 ]] && {
+    echo "$camera_list" | grep -iA 1 "$*" | tail -n 1 | sed 's/[[:space:]]*//g'
+} || {
+    echo "$camera_list" | grep "("
+}

@@ -1,0 +1,93 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  moody_today_reference
+# 
+#         USAGE:  ./moody_today_reference
+#
+#   DESCRIPTION:  Get the reading for the current day
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/09/2023 11:47:08 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+thedate=$1
+[[ $# -eq 0 ]] && thedate=$(date +"%F")
+
+function cleanup() {
+    sed -e 's_</p>_</p>\n_g'  | sed -e "s/<.*versehover'>//" -e 's_</span>__' -e '/<\/div>/d' -e 's_</a></p>__g'
+}
+
+function get_field(){
+    index=$1
+    ref=0
+    shift
+    #1|Genesis|15|https://kingjamesbibleonline.org/Genesis-Chapter-15/
+    case $index in
+        bookordinal) ref=1;;
+        bookname) ref=2;;
+        chapter) ref=3;;
+        reference) ref=4;;
+        *) ref=0;;
+    esac
+    echo "$@" | cut -d'|' -f$ref
+}
+
+function get_reference() {
+    read -r -d '' sql <<EOF
+    WITH chapters AS
+(SELECT bb.id as book_ordinal, long_name, 
+    generate_series(regexp_replace(chapter_range,'-.*$','','g')::int, regexp_replace(chapter_range,'^.*-','','g')::int) chapter 
+    FROM bible_reading_3year b3 
+    INNER JOIN bible_books bb 
+        ON b3.book_reference = bb.moody_name 
+        WHERE read_date='$1'::date)
+    SELECT c.*, 'https://kingjamesbibleonline.org/' || 
+        regexp_replace(long_name,' ','-','g') || 
+        '-Chapter-' || chapter || '/' AS reference
+    FROM  chapters c;
+EOF
+    psql -qtAc "$sql"
+}
+
+function get_chapter() {
+
+    wget -qO- "$1"  | grep "verse detail"  | cleanup
+
+}
+
+function html2md(){
+
+    # replace <em></em> with **
+    # replace EOL with \
+    # then remove it on the last line
+
+    sed -e 's_</em>_\*\*_g' \
+        -e 's_<em>_**_g' \
+        -e 's/$/ \\/' \
+        -e '$s_\\$__'
+}
+
+IFS=$'\n'
+for chapter in $(get_reference $thedate)
+do
+    ordinal_justified=$(get_field bookordinal $chapter)
+    (( ordinal_justified *= 100 ))
+    ordinal_justified=$(printf '%04i' $ordinal_justified)
+    chapter_justified=$(get_field chapter $chapter)
+    chapter_justified=$(printf '%03i' $chapter_justified)
+    cat <<EOF
+[King James Online]($(get_field reference $chapter)) 
+[King James 1611]($(get_field reference $chapter | sed -e 's!org/!org/1611_!')) 
+[[${ordinal_justified}_$(get_field bookname $chapter)_${chapter_justified}]]
+
+EOF
+
+done

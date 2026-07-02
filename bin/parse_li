@@ -1,0 +1,1938 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+function osm_company_lookup() {
+    local company="$1"
+
+    [[ -z "$company" ]] && return 0
+
+    curl -fsS --get 'https://nominatim.openstreetmap.org/search' \
+        --data-urlencode "q=$company" \
+        --data-urlencode 'format=jsonv2' \
+        --data-urlencode 'addressdetails=1' \
+        --data-urlencode 'limit=1' \
+        -H 'User-Agent: parse_li/1.0 kirk.roybal@gmail.com'
+}
+
+function fetch_linkedin() {
+    local url="$1"
+    local outfile="$2"
+    local ws
+    local tab_json
+    local tab_id
+
+    curl -fsS http://127.0.0.1:9222/json/version >/dev/null || {
+        echo "Start Brave first:" >&2
+        echo 'brave-browser --remote-debugging-port=9222 &' >&2
+        exit 1
+    }
+
+    tab_json="$(
+        curl -fsS -X PUT "http://127.0.0.1:9222/json/new?${url}"
+    )"
+
+    tab_id="$(jq -r '.id' <<<"$tab_json")"
+    ws="$(jq -r '.webSocketDebuggerUrl' <<<"$tab_json")"
+
+    [[ -n "$ws" && "$ws" != "null" ]] || {
+        echo "Could not get DevTools websocket URL" >&2
+        [[ -n "${tab_id:-}" && "$tab_id" != "null" ]] &&
+            curl -fsS "http://127.0.0.1:9222/json/close/${tab_id}" >/dev/null 2>&1 || true
+        exit 1
+    }
+
+    {
+        echo '{"id":1,"method":"Page.enable"}'
+        echo '{"id":2,"method":"Runtime.enable"}'
+        sleep 3
+        # LinkedIn lazy-loads the Experience/Education sections only as they
+        # scroll into view.  Incrementally scroll the whole page (re-checking
+        # scrollHeight as content grows), then return to the top, before
+        # capturing outerHTML.  Without this the DOM contains only the top card.
+        echo '{"id":3,"method":"Runtime.evaluate","params":{"awaitPromise":true,"returnByValue":true,"expression":"(async()=>{const s=ms=>new Promise(r=>setTimeout(r,ms));let y=0;for(let i=0;i<30;i++){y+=800;window.scrollTo(0,y);await s(350);if(y>=document.body.scrollHeight){await s(500);if(y>=document.body.scrollHeight)break;}}window.scrollTo(0,0);await s(1000);return document.documentElement.outerHTML;})()"}}'
+        sleep 14
+    } | websocat -B 20000000 "$ws" |
+        tr -d '\000-\010\013\014\016-\037' |
+        jq -r 'select(.id==3) | .result.result.value' > "$outfile"
+
+    local rc=$?
+
+    curl -fsS "http://127.0.0.1:9222/json/close/${tab_id}" >/dev/null 2>&1 || true
+
+    [[ $rc -eq 0 ]] || exit "$rc"
+
+    [[ -s "$outfile" ]] || {
+        echo "No HTML returned" >&2
+        exit 1
+    }
+}
+
+function ensure_brave_debug() {
+    if curl -fsS http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Brave is not running with remote debugging." >&2
+    echo "Close Brave completely, then start it with:" >&2
+    echo >&2
+    echo '  brave-browser --remote-debugging-port=9222 --user-data-dir="$HOME/.config/BraveSoftware/Brave-Browser" &' >&2
+    echo >&2
+    exit 1
+}
+
+url="${1:?Usage: $0 <linkedin-url>}"
+
+Obsidian="${VAULT:-${Obsidian:-$HOME/Documents/notes}}"
+
+# : "${Obsidian:?Set Obsidian to your vault path}"
+
+tmp="$(mktemp)"
+tmp_maps="$(mktemp)"
+trap 'rm -f "$tmp" "$tmp_maps"' EXIT
+
+fetch_linkedin  "$url" "$tmp"
+
+#echo "DEBUG og:title:"
+#grep -io '<meta[^>]*property="og:title"[^>]*>' "$tmp" | head -1 || true
+
+#echo "DEBUG profile keywords:"
+#grep -Eio 'authwall|sign in|join linkedin|Shane|Tomlinson|linkedin' "$tmp" | sort -u | head -20 || true
+
+# Detect login wall / blocked page
+#grep -Eiq \
+#    'sign in|join linkedin|authwall|login' \
+#    "$tmp" && {
+#    echo "LinkedIn returned a login/auth wall." >&2
+#    exit 1
+#} || true
+#
+#grep -qi linkedin "$tmp" || {
+#    echo "Failed to fetch page"
+#    exit 1
+#} || true
+#
+#grep -qi '<title>' "$tmp" || {
+#    echo "No HTML returned"
+#    exit 1
+#} || true
+#
+#grep -qi 'sign in to linkedin' "$tmp" && {
+#    echo "LinkedIn login wall returned"
+#    exit 1
+#} || true
+
+page_title="$(
+    grep -io '<title>[^<]*</title>' "$tmp" |
+    head -1 |
+    sed -E 's#</?title>##Ig; s/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//'
+)"
+
+#echo "DEBUG bash page_title=[$page_title]"
+
+#python3 - "$tmp" "$url" "$Obsidian" <<'PY'
+python3 - "$tmp" "$url" "$Obsidian" "$page_title" <<'PY'
+import sys
+import os
+import re
+import json
+import html
+import subprocess
+import time
+import urllib.parse
+import urllib.request
+import mimetypes
+from pathlib import Path
+from datetime import date
+
+# html_file, profile_url, obsidian = sys.argv[1:]
+html_file, profile_url, obsidian, bash_page_title = sys.argv[1:]
+
+company = ""
+photo = ""
+maps_street = ""
+maps_city = ""
+maps_state = ""
+maps_zip = ""
+maps_country = ""
+company_phone = ""
+person_location = ""
+street = ""
+city = ""
+state = ""
+country = ""
+zip_code = ""
+company_location_query = ""
+company_location_url = ""
+
+text = Path(html_file).read_text(errors="ignore")
+
+# DEBUG=1: dump the raw DOM, every /company/ anchor, and the Experience-section
+# HTML so the extraction logic can be built against the real structure.
+# Behavior-preserving: writes to /tmp only, changes nothing else.
+if os.environ.get("DEBUG", "0") not in ("", "0", "false", "False"):
+    try:
+        Path("/tmp/parse_li_raw.html").write_text(text, encoding="utf-8")
+
+        anchors = []
+        for am in re.finditer(
+            r'<a\b[^>]*href="([^"]*/company/[^"]*)"[^>]*>(.*?)</a>',
+            text, re.I | re.S,
+        ):
+            href = am.group(1)
+            atext = re.sub(r"<[^>]+>", " ", am.group(2))
+            atext = re.sub(r"\s+", " ", html.unescape(atext)).strip()
+            anchors.append(f"{atext}\t{href}")
+        Path("/tmp/parse_li_company_anchors.txt").write_text(
+            "\n".join(anchors) or "(no /company/ anchors found)", encoding="utf-8"
+        )
+
+        exp = "(no id=\"experience\" anchor found)"
+        m = re.search(r'id=["\']experience["\']', text, re.I)
+        if m:
+            tail = text[m.start():m.start() + 200000]
+            nxt = re.search(
+                r'id=["\'](education|licenses|skills|volunteering|'
+                r'honors|projects|recommendations|interests)',
+                tail[20:], re.I,
+            )
+            exp = tail[: (nxt.start() + 20) if nxt else 200000]
+        Path("/tmp/parse_li_experience.html").write_text(exp, encoding="utf-8")
+
+        print(
+            "DEBUG dump -> /tmp/parse_li_raw.html, "
+            "/tmp/parse_li_company_anchors.txt, /tmp/parse_li_experience.html",
+            file=sys.stderr,
+        )
+    except Exception as e:
+        print(f"DEBUG dump failed: {e}", file=sys.stderr)
+
+def update_frontmatter(path, new_frontmatter):
+    if not path.exists():
+        path.write_text(new_frontmatter)
+        return
+
+    old = path.read_text(errors="ignore")
+
+    m = re.match(
+        r'^---\n.*?\n---\n?',
+        old,
+        re.S,
+    )
+
+    if m:
+        body = old[m.end():]
+    else:
+        body = old
+
+    path.write_text(new_frontmatter + body)
+
+def image_extension_from_content_type(content_type):
+    content_type = (content_type or "").split(";", 1)[0].strip().lower()
+    if content_type in {"image/jpeg", "image/jpg"}:
+        return ".jpg"
+    if content_type == "image/png":
+        return ".png"
+    if content_type == "image/webp":
+        return ".webp"
+
+    guessed = mimetypes.guess_extension(content_type or "")
+    return guessed or ".jpg"
+
+
+def download_profile_photo(photo_url, assets_dir, slug):
+    photo_url = yaml_scalar(photo_url)
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", yaml_scalar(slug)).strip("-._") or "linkedin-profile"
+
+    if not photo_url:
+        return ""
+
+    assets_dir.mkdir(parents=True, exist_ok=True)
+
+    req = urllib.request.Request(
+        photo_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 parse_li/1.0",
+            "Referer": "https://www.linkedin.com/",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            content_type = r.headers.get("Content-Type", "")
+            data = r.read()
+    except Exception as e:
+        print(f"WARNING could not download LinkedIn profile photo: {e}", file=sys.stderr)
+        return ""
+
+    if not data:
+        return ""
+
+    ext = image_extension_from_content_type(content_type)
+    out = assets_dir / f"linkedin-{slug}{ext}"
+    out.write_bytes(data)
+    return out.name
+
+
+def update_body_profile_picture(body, asset_filename):
+    if not asset_filename:
+        return body
+
+    rel = f"assets/{asset_filename}"
+    replacement = f"![|250]({rel})"
+
+    # Replace the first ordinary Markdown image line.  This targets the existing
+    # people-page template line like ![|250](), and also replaces earlier
+    # LinkedIn hotlinks produced by old parse_li versions.
+    pattern = re.compile(r"(?m)^!\[[^\]\n]*(?:\|250)?[^\]\n]*\]\([^\)\n]*\)\s*$")
+    if pattern.search(body):
+        return pattern.sub(replacement, body, count=1)
+
+    # If no image line exists, insert one at the top of the body, keeping the
+    # rest of the page exactly as-is.
+    return replacement + "\n\n" + body.lstrip("\n")
+
+
+def close_tab(tab_id):
+    if not tab_id:
+        return
+
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:9222/json/close/{tab_id}",
+            method="GET",
+        )
+
+        with urllib.request.urlopen(req, timeout=5):
+            pass
+
+    except Exception as e:
+        print(f"DEBUG close_tab failed: {e}")
+
+
+def devtools_fetch(url):
+    with urllib.request.urlopen("http://127.0.0.1:9222/json/version", timeout=5):
+        pass
+
+    req = urllib.request.Request(
+        "http://127.0.0.1:9222/json/new?"
+        + urllib.parse.quote(url, safe=":/?&=,+%"),
+        method="PUT",
+    )
+
+    with urllib.request.urlopen(req, timeout=10) as r:
+        tab = json.loads(r.read().decode("utf-8"))
+
+    tab_id = tab.get("id")
+    ws = tab.get("webSocketDebuggerUrl")
+
+    if not ws:
+        print("DEBUG no websocket URL")
+        close_tab(tab_id)
+        return ""
+
+    p = None
+
+    try:
+        p = subprocess.Popen(
+            ["websocat", "-B", "20000000", ws],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        def send(obj):
+            p.stdin.write(json.dumps(obj) + "\n")
+            p.stdin.flush()
+
+        send({"id": 1, "method": "Page.enable"})
+        send({"id": 2, "method": "Runtime.enable"})
+
+        send({
+            "id": 3,
+            "method": "Page.navigate",
+            "params": {"url": url},
+        })
+
+        time.sleep(10)
+
+        send({
+            "id": 4,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": "document.body.innerText",
+                "returnByValue": True,
+            },
+        })
+
+        time.sleep(3)
+
+        p.stdin.close()
+
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+
+        stdout = p.stdout.read() if p.stdout else ""
+        stderr = p.stderr.read() if p.stderr else ""
+
+        Path("/tmp/websocat.stdout").write_text(stdout)
+        Path("/tmp/websocat.stderr").write_text(stderr)
+
+        for line in stdout.splitlines():
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+
+            if obj.get("id") == 4:
+                return (
+                    obj.get("result", {})
+                    .get("result", {})
+                    .get("value", "")
+                    or ""
+                )
+
+        print("DEBUG no id=4 result; see /tmp/websocat.stdout and /tmp/websocat.stderr")
+        return ""
+
+    finally:
+        if p and p.poll() is None:
+            p.kill()
+
+        close_tab(tab_id)
+
+def visible_lines(fragment):
+    fragment = re.sub(r"<script.*?</script>", " ", fragment, flags=re.I | re.S)
+    fragment = re.sub(r"<style.*?</style>", " ", fragment, flags=re.I | re.S)
+    fragment = re.sub(r"<[^>]+>", "\n", fragment)
+    fragment = html.unescape(fragment)
+
+    return [
+        re.sub(r"\s+", " ", line).strip()
+        for line in fragment.splitlines()
+        if re.sub(r"\s+", " ", line).strip()
+    ]
+
+def looks_like_location(line):
+    if line in {name, title, company}:
+        return False
+
+    patterns = [
+        r"\bMetroplex\b",
+        r"\bMetropolitan Area\b",
+        r"\bGreater .* Area\b",
+        r"\bUnited States\b",
+        r"\bCanada\b",
+        r"\bUnited Kingdom\b",
+        r"\bTexas\b",
+        r"\bCalifornia\b",
+        r"\bNew York\b",
+        r"\bFlorida\b",
+        r"\bIllinois\b",
+    ]
+
+    return any(re.search(p, line, re.I) for p in patterns)
+
+def meta(name):
+    patterns = [
+        rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']*)',
+        rf'<meta[^>]+name=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']*)',
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I | re.S)
+        if m:
+            return html.unescape(m.group(1)).strip()
+
+    return ""
+
+def title_tag():
+    m = re.search(r'<title[^>]*>(.*?)</title>', text, re.I | re.S)
+    if not m:
+        return ""
+    value = html.unescape(m.group(1))
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+def clean_linkedin_title(value):
+    value = yaml_scalar(value)
+    value = re.sub(r"\s*\|\s*LinkedIn.*$", "", value, flags=re.I).strip()
+    return value
+
+def headline_from_page_title(page_title, profile_name):
+    """
+    Conservative LinkedIn <title> fallback.
+
+    Only accept the normal public-profile browser-title convention:
+      Name - Current Position Title - Company | LinkedIn
+
+    Do not treat arbitrary one-part profile headlines/taglines as data.  That
+    top-profile headline is user editable and is often abused for ads,
+    taglines, keyword stuffing, recruiting blurbs, or multiple positions.
+    """
+    raw_title = yaml_scalar(page_title)
+    profile_name = yaml_scalar(profile_name)
+
+    if not raw_title or not profile_name:
+        return "", ""
+
+    # Must be an actual LinkedIn title, not some scraped/generated fallback.
+    if not re.search(r"\s*\|\s*LinkedIn\s*$", raw_title, flags=re.I):
+        return "", ""
+
+    cleaned = clean_linkedin_title(raw_title)
+    prefix = profile_name + " - "
+    if not cleaned.casefold().startswith(prefix.casefold()):
+        return "", ""
+
+    rest = cleaned[len(prefix):].strip()
+    if not rest:
+        return "", ""
+
+    parts = [p.strip() for p in re.split(r"\s+-\s+", rest) if p.strip()]
+
+    # Accept only the exact convention after the profile name:
+    #   Current Position Title - Company
+    # If there are fewer or more sections, it is probably a custom headline or
+    # otherwise ambiguous.  Leave title/company blank rather than polluting YAML.
+    if len(parts) != 2:
+        return "", ""
+
+    current_title, current_company = parts
+
+    # Lightweight sanity checks.  These avoid writing obviously non-position
+    # marketing content when LinkedIn/search returns a customized title.
+    bad_markers = re.compile(
+        r"\b(hiring|recruiting|open to work|available|seeking|looking for|"
+        r"contact me|dm me|follow me|subscribe|speaker|coach|mentor)\b",
+        re.I,
+    )
+    if bad_markers.search(current_title) or bad_markers.search(current_company):
+        return "", ""
+
+    return current_title, current_company
+
+def one_part_headline_from_page_title(page_title, profile_name):
+    """
+    Fallback for public LinkedIn/search-result title shape:
+      Name - Profile Headline | LinkedIn
+
+    This is only a title fallback.  It must never be split into company.
+    """
+    raw_title = yaml_scalar(page_title)
+    profile_name = yaml_scalar(profile_name)
+
+    if not raw_title or not profile_name:
+        return ""
+
+    if not re.search(r"\s*\|\s*LinkedIn\s*$", raw_title, flags=re.I):
+        return ""
+
+    cleaned = clean_linkedin_title(raw_title)
+    prefix = profile_name + " - "
+    if not cleaned.casefold().startswith(prefix.casefold()):
+        return ""
+
+    rest = cleaned[len(prefix):].strip()
+    if not rest:
+        return ""
+
+    parts = [p.strip() for p in re.split(r"\s+-\s+", rest) if p.strip()]
+    if len(parts) != 1:
+        return ""
+
+    candidate = parts[0]
+    if not plausible_profile_headline(candidate):
+        return ""
+
+    return candidate
+
+def plausible_profile_headline(line):
+    line = yaml_scalar(line)
+    if not line or len(line) > 120:
+        return False
+
+    bad_markers = re.compile(
+        r"\b(hiring|recruiting|open to work|available|seeking|looking for|"
+        r"contact me|dm me|follow me|subscribe)\b",
+        re.I,
+    )
+    if bad_markers.search(line):
+        return False
+
+    bad_exact = {
+        "LinkedIn",
+        "Sign in",
+        "Join now",
+        "Message",
+        "Contact info",
+        "More",
+        "Experience",
+        "Education",
+        "Activity",
+        "Posts",
+    }
+    return line not in bad_exact
+
+def visible_text_lines():
+    return visible_lines(text)
+
+def line_is_boilerplate(line):
+    if not line:
+        return True
+
+    if len(line) > 140:
+        return True
+
+    exact = {
+        "LinkedIn", "Sign in", "Join now", "Message", "Contact info", "More",
+        "Show more", "Show less", "Experience", "Education", "Activity",
+        "Posts", "View profile", "Follow", "Connect", "People also viewed",
+        "Explore content categories", "Skip to main content",
+    }
+    if line in exact:
+        return True
+
+    patterns = [
+        r"^\d+[Kk]?[+]?\s+followers?$",
+        r"^\d+[Kk]?[+]?\s+connections?$",
+        r"^\d+\s+posts?$",
+        r"^Image:",
+        r"logo$",
+        r"^View .* profile$",
+        r"^\w+\s+profile$",
+        r"^\d+\s*(yr|yrs|mo|mos)\b",
+        r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b",
+        r"^Present$",
+        r"^Full-time$",
+        r"^Part-time$",
+        r"^Remote$",
+        r"^Hybrid$",
+        r"^On-site$",
+    ]
+    return any(re.search(p, line, re.I) for p in patterns)
+
+def extract_topcard_headline(profile_name):
+    lines = visible_text_lines()
+    profile_cf = yaml_scalar(profile_name).casefold()
+
+    for i, line in enumerate(lines):
+        if yaml_scalar(line).casefold() != profile_cf:
+            continue
+
+        for candidate in lines[i + 1:i + 20]:
+            candidate = yaml_scalar(candidate)
+            if line_is_boilerplate(candidate):
+                continue
+            if looks_like_location(candidate):
+                continue
+            if plausible_profile_headline(candidate):
+                return candidate
+
+    return ""
+
+def clean_company_candidate(value):
+    value = yaml_scalar(value)
+    value = re.sub(r"^View company:\s*", "", value, flags=re.I).strip()
+    value = re.sub(r"\s+logo$", "", value, flags=re.I).strip()
+
+    # LinkedIn often renders org/employment type as:
+    #   UWorld · Full-time
+    #   MarketScale · Full-time
+    # Keep the organization before the separator.
+    value = re.split(
+        r"\s+(?:·|•|\||—|–|-)\s+(?:Full-time|Part-time|Contract|Self-employed|Freelance|Internship|Temporary|Apprenticeship)\b",
+        value,
+        1,
+        flags=re.I,
+    )[0].strip()
+
+    value = re.sub(r"^[·•\-–—\s]+|[·•\-–—\s]+$", "", value).strip()
+    return value
+
+
+def experience_stop_line(value):
+    value = yaml_scalar(value)
+    return value in {
+        "Education", "Licenses & certifications", "Licenses & Certifications",
+        "Volunteer experience", "Volunteering", "Skills", "Recommendations",
+        "Projects", "Publications", "Courses", "Honors & awards",
+        "Interests", "Activity", "Posts",
+    }
+
+
+def experience_noise_line(value):
+    value = yaml_scalar(value)
+    if not value:
+        return True
+    if line_is_boilerplate(value):
+        return True
+    if looks_like_location(value):
+        return True
+    if re.search(r"\b(Experience|followers|connections|1st|2nd|3rd|degree connection)\b", value, re.I):
+        return True
+    if re.search(r"\b(Present|Full-time|Part-time|Self-employed|Freelance|Contract|Remote|Hybrid|On-site)\b", value, re.I):
+        return True
+    if re.search(r"\b\d+\s+(yrs?|years?|mos?|months?)\b", value, re.I):
+        return True
+    if re.search(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\b", value, re.I):
+        return True
+    return False
+
+
+def looks_like_job_title(value):
+    value = yaml_scalar(value)
+    if not value:
+        return False
+
+    # Common LinkedIn role/title words.  These are poor company names and were
+    # observed being falsely accepted from the first Experience block, e.g.
+    # "Director Corporate Payables".
+    title_words = (
+        "director", "manager", "engineer", "analyst", "specialist",
+        "consultant", "administrator", "president", "vice president",
+        "vp", "svp", "chief", "officer", "controller", "partner",
+        "founder", "owner", "lead", "head", "architect", "developer",
+        "coordinator", "recruiter", "sales", "operations", "payables",
+        "contract administration", "project development", "business process",
+        "client financial", "internal audit",
+    )
+    lowered = value.casefold()
+    return any(word in lowered for word in title_words)
+
+
+def extract_company_from_experience(profile_name, current_title=""):
+    """
+    Company is intentionally taken from the first listed Experience/job entry,
+    not from the top-card/header.  LinkedIn profile headlines are user-editable
+    and often contain advertising/taglines; the Experience block is the least
+    bad public source for the current organization.
+    """
+    lines = visible_text_lines()
+    profile_cf = yaml_scalar(profile_name).casefold()
+    title_cf = yaml_scalar(current_title).casefold()
+
+    for i, line in enumerate(lines):
+        if yaml_scalar(line).casefold() != "experience":
+            continue
+
+        raw_block = []
+        for candidate in lines[i + 1:i + 80]:
+            candidate = yaml_scalar(candidate)
+            if experience_stop_line(candidate):
+                break
+            raw_block.append(candidate)
+
+        # Rendered LinkedIn shapes observed from Brave innerText:
+        #
+        # Shape A:
+        #   Experience
+        #   McKesson logo
+        #   McKesson
+        #   17 yrs 6 mos
+        #   Senior Director Contract Administration
+        #
+        # Shape B:
+        #   Experience
+        #   UWorld logo
+        #   Media Production Specialist
+        #   UWorld · Full-time
+        #   May 2023 - Present
+        #
+        # Do not break when a job title appears before the company.  Scan the
+        # first current-job card until the first date/duration/location boundary.
+        first_block_seen = set()
+        for candidate in raw_block[:25]:
+            raw_candidate = yaml_scalar(candidate)
+            candidate = clean_company_candidate(raw_candidate)
+            if not candidate:
+                continue
+            if raw_candidate.casefold().endswith(" logo"):
+                # A later line normally carries the same company name without "logo".
+                # Do not return from the image alt text itself.
+                continue
+            if candidate.casefold() == profile_cf:
+                continue
+            if experience_noise_line(raw_candidate) and not plausible_company_name(candidate):
+                continue
+            if title_cf and candidate.casefold() == title_cf:
+                continue
+            if looks_like_job_title(candidate):
+                # Title-before-company layout. Keep scanning.
+                continue
+            key = candidate.casefold()
+            if key in first_block_seen:
+                continue
+            first_block_seen.add(key)
+            if plausible_company_name(candidate):
+                return candidate
+
+
+        # First, accept an explicit first-job line like:
+        #   Finance & Operations Professional at McKesson
+        for candidate in raw_block[:25]:
+            compact_title, compact_company = split_title_company_from_compact_headline(candidate)
+            if not compact_company:
+                continue
+            if title_cf and compact_title.casefold() != title_cf:
+                continue
+            compact_company = clean_company_candidate(compact_company)
+            if plausible_company_name(compact_company):
+                return compact_company
+
+        # Build a cleaned first-job block.  Do not remove the title yet; its
+        # position is useful for identifying the following company line.
+        block = []
+        seen = set()
+        for raw_candidate in raw_block[:35]:
+            candidate = clean_company_candidate(raw_candidate)
+            if not candidate:
+                continue
+            if candidate.casefold() == profile_cf:
+                continue
+            if experience_noise_line(raw_candidate) and not plausible_company_name(candidate):
+                continue
+            key = candidate.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            block.append(candidate)
+
+        # Strongest Experience-shape rule: current title line followed by the
+        # organization line in the same first job card.
+        if title_cf:
+            for j, candidate in enumerate(block):
+                if candidate.casefold() != title_cf:
+                    continue
+                for possible_company in block[j + 1:j + 6]:
+                    if possible_company.casefold() == title_cf:
+                        continue
+                    if plausible_company_name(possible_company):
+                        return possible_company
+
+        # Common public layout without a reliable title match:
+        #   Job title
+        #   Company
+        # If the first item looks like a headline/title, take the next plausible
+        # organization-looking line.
+        if len(block) >= 2 and plausible_profile_headline(block[0]):
+            for possible_company in block[1:6]:
+                if plausible_company_name(possible_company):
+                    return possible_company
+
+        # Last resort within Experience only: the first plausible line.  This is
+        # deliberately after the title-following rules to avoid choosing job
+        # titles as companies when the title is available.
+        for candidate in block[:8]:
+            if title_cf and candidate.casefold() == title_cf:
+                continue
+            if plausible_company_name(candidate):
+                return candidate
+
+        break
+
+    return ""
+
+
+def plausible_company_name(value):
+    value = yaml_scalar(value)
+    if not value or len(value) > 100:
+        return False
+
+    # Reject LinkedIn UI chrome / punctuation-only separators such as "·".
+    if not re.search(r"[A-Za-z0-9]", value):
+        return False
+
+    if looks_like_location(value):
+        return False
+    if looks_like_job_title(value):
+        return False
+
+    bad_exact = {
+        "LinkedIn", "Sign in", "Join now", "Message", "Contact info",
+        "More", "Experience", "Education", "Activity", "Posts",
+        "View profile", "Follow", "Connect", "People also viewed",
+        "Cover photo", "About", "Services", "Featured", "Recommendations",
+        "Interests", "Show all", "Request services",
+    }
+    if value in bad_exact:
+        return False
+
+    bad_patterns = [
+        r"^\d+[Kk]?[+]?\s+(followers?|connections?)$",
+        r"^\d+\s*(yr|yrs|mo|mos)\b",
+        r"^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b",
+        r"\b(Present|Full-time|Part-time|Remote|Hybrid|On-site)\b",
+        r"[!?]$",
+        r"^[·•\-–—]\s*\d+(st|nd|rd|th)\b",
+        r"^\d+(st|nd|rd|th)\b",
+        r"\b(1st|2nd|3rd|degree connection|connection degree)\b",
+        r"\b(hiring|recruiting|open to work|available|seeking|looking for)\b",
+        r"^(Message|Follow|Connect)\b",
+        r"^Message\s+[A-Z][A-Za-z .'-]+$",
+        r"^Follow\s+[A-Z][A-Za-z .'-]+$",
+        r"^View\s+.+profile$",
+        r"^www\.",
+        r"\.(com|org|net|io|co)\b",
+    ]
+    if any(re.search(p, value, re.I) for p in bad_patterns):
+        return False
+
+    # Keep this conservative: a current company/org line is normally short.
+    if len(value.split()) > 8:
+        return False
+
+    return True
+
+def split_title_company_from_compact_headline(value):
+    value = yaml_scalar(value)
+    if not value:
+        return "", ""
+
+    # LinkedIn snippets commonly add separators after the company.  Trim those
+    # before evaluating the compact "Title at Company" shape.
+    value = re.split(r"\s+(?:·|\||-)\s+", value, 1)[0].strip()
+
+    for sep in (" at ", " @ ", " | "):
+        if sep in value:
+            left, right = value.rsplit(sep, 1)
+            left = yaml_scalar(left)
+            right = yaml_scalar(right)
+            if left and right and plausible_profile_headline(left) and plausible_company_name(right):
+                return left, right
+
+    return "", ""
+
+def extract_topcard_company(profile_name, current_title):
+    """
+    Public LinkedIn often renders the top card as separate visible lines:
+      Name
+      Current title/headline
+      Company
+      Location
+
+    The earlier top-card parser can recover the title.  This companion parser
+    only accepts a nearby short organization-looking line after that title.
+    It does not overwrite existing YAML; it only supplies a candidate value.
+    """
+    lines = visible_text_lines()
+    profile_cf = yaml_scalar(profile_name).casefold()
+    title_cf = yaml_scalar(current_title).casefold()
+
+    if not profile_cf or not title_cf:
+        return ""
+
+    for i, line in enumerate(lines):
+        if yaml_scalar(line).casefold() != profile_cf:
+            continue
+
+        # Find the displayed title/headline near the profile name.
+        title_idx = None
+        for j, candidate in enumerate(lines[i + 1:i + 25], start=i + 1):
+            if yaml_scalar(candidate).casefold() == title_cf:
+                title_idx = j
+                break
+
+        if title_idx is None:
+            continue
+
+        # The company, when present in the public top card, is usually one of
+        # the next few non-boilerplate lines before location/follow stats.
+        # Stop at profile action controls; do not treat "Message Zac" as an org.
+        for candidate in lines[title_idx + 1:title_idx + 12]:
+            candidate = yaml_scalar(candidate)
+            if not candidate:
+                continue
+            if re.search(r"^(More|Follow|Message|Connect|Contact info|Cover photo|About|Services|Featured)$", candidate, re.I):
+                break
+            if re.search(r"^(Message|Follow|Connect)\s+", candidate, re.I):
+                break
+            if candidate.casefold() in {profile_cf, title_cf}:
+                continue
+            if re.search(r"\blogo$", candidate, re.I):
+                continue
+            if line_is_boilerplate(candidate):
+                continue
+            if plausible_company_name(candidate):
+                return candidate
+
+    return ""
+
+
+def extract_company_from_title_sources(profile_name, current_title, page_title, og_description):
+    """Conservative fallback for company when Experience extraction is blank.
+
+    We still prefer Experience.  This only runs when Experience produced no
+    company.  It accepts:
+      - normal browser title: Name - Title - Company | LinkedIn
+      - compact headline/description: Title at Company
+      - visible top-card title followed by a short org line
+      - visible line near title matching "<title> at <company>"
+    """
+    profile_name = yaml_scalar(profile_name)
+    current_title = yaml_scalar(current_title)
+
+    # 1. Browser title convention.
+    title_from_page, company_from_page = headline_from_page_title(page_title, profile_name)
+    if company_from_page and (not current_title or title_from_page.casefold() == current_title.casefold()):
+        company_from_page = clean_company_candidate(company_from_page)
+        if plausible_company_name(company_from_page):
+            return company_from_page
+
+    # 2. og:description compact form.
+    compact_title, compact_company = split_title_company_from_compact_headline(og_description)
+    if compact_company and (not current_title or compact_title.casefold() == current_title.casefold()):
+        compact_company = clean_company_candidate(compact_company)
+        if plausible_company_name(compact_company):
+            return compact_company
+
+    # 3. Rendered visible text: top-card company line after title.
+    company = extract_topcard_company(profile_name, current_title)
+    if company and plausible_company_name(company):
+        return company
+
+    # 4. Rendered visible text: adjacent/compact line near title.
+    company = extract_company_near_title(current_title)
+    if company and plausible_company_name(company):
+        return company
+
+    return ""
+
+def extract_company_near_title(current_title):
+    title_cf = yaml_scalar(current_title).casefold()
+    if not title_cf:
+        return ""
+
+    lines = visible_text_lines()
+
+    # Explicit compact visible line: "Title at Company".
+    for line in lines:
+        compact_title, compact_company = split_title_company_from_compact_headline(line)
+        if compact_company and compact_title.casefold() == title_cf:
+            return compact_company
+
+    # Adjacent visible line: title followed by organization.  Do not scan
+    # through top-card action buttons.
+    for i, line in enumerate(lines):
+        if yaml_scalar(line).casefold() != title_cf:
+            continue
+        for candidate in lines[i + 1:i + 8]:
+            candidate = yaml_scalar(candidate)
+            if re.search(r"^(More|Follow|Message|Connect|Contact info|Cover photo|About|Services|Featured)$", candidate, re.I):
+                break
+            if re.search(r"^(Message|Follow|Connect)\s+", candidate, re.I):
+                break
+            if line_is_boilerplate(candidate):
+                continue
+            if plausible_company_name(candidate):
+                return candidate
+
+    return ""
+
+def parse_frontmatter(text):
+    m = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
+    if not m:
+        return {}, [], text
+
+    fm_text = m.group(1)
+    body = text[m.end():]
+
+    data = {}
+    order = []
+    current_key = None
+
+    for line in fm_text.splitlines():
+        if not line.strip():
+            continue
+
+        # Continuation line, e.g. YAML list item:
+        # tags:
+        #   - linkedin
+        if line.startswith((" ", "\t")) and current_key:
+            data[current_key] = (
+                data.get(current_key, "") + "\n" + line.rstrip()
+            ).strip("\n")
+            continue
+
+        if ":" not in line:
+            continue
+
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+
+        data[key] = value
+        order.append(key)
+        current_key = key
+
+    return data, order, body
+
+def render_frontmatter(data, order):
+    seen = set()
+    lines = ["---"]
+
+    for key in order:
+        if key in data and key not in seen:
+            value = data.get(key, "")
+            if "\n" in value:
+                lines.append(f"{key}:")
+                lines.extend(value.splitlines())
+            else:
+                lines.append(f"{key}: {value}")
+            seen.add(key)
+
+    for key, value in data.items():
+        if key not in seen:
+            if "\n" in value:
+                lines.append(f"{key}:")
+                lines.extend(value.splitlines())
+            else:
+                lines.append(f"{key}: {value}")
+
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+LINKEDIN_TAG = "linkedin"
+TEMPLATE_ONLY_TAGS = {"🐘😇People", "DRW"}
+
+def yaml_scalar(value):
+    return "" if value is None else str(value).strip()
+
+def yaml_list_items(value):
+    value = yaml_scalar(value)
+    if not value:
+        return []
+
+    items = []
+    for line in value.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            item = line[1:].strip()
+        else:
+            item = line
+        if item:
+            items.append(item)
+    return items
+
+def render_tags(items, *, prefer_list):
+    cleaned = []
+    seen = set()
+
+    for item in items:
+        item = yaml_scalar(item)
+        if not item or item in seen:
+            continue
+        cleaned.append(item)
+        seen.add(item)
+
+    if not cleaned:
+        return ""
+
+    if prefer_list or len(cleaned) > 1:
+        return "\n".join(f"  - {item}" for item in cleaned)
+
+    return cleaned[0]
+
+def split_alias_values(value):
+    value = yaml_scalar(value)
+    if not value:
+        return []
+    items = []
+    for line in value.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            line = line[1:].strip()
+        # Existing scalar aliases may be comma/semicolon separated.
+        for part in re.split(r"[,;]", line):
+            part = yaml_scalar(part)
+            if part and part not in items:
+                items.append(part)
+    return items
+
+
+def normalize_alias_key(value):
+    return re.sub(r"\s+", " ", yaml_scalar(value)).strip().casefold()
+
+
+def merge_aliases(existing_value, incoming_value, *, canonical_name=""):
+    canonical_key = normalize_alias_key(canonical_name)
+    vals = []
+    for alias in split_alias_values(existing_value) + split_alias_values(incoming_value):
+        if not alias:
+            continue
+        if canonical_key and normalize_alias_key(alias) == canonical_key:
+            continue
+        if alias not in vals:
+            vals.append(alias)
+    if not vals:
+        return ""
+    if "\n" in yaml_scalar(existing_value) or len(vals) > 1:
+        return "\n".join(f"  - {x}" for x in vals)
+    return vals[0]
+
+
+def ensure_tag(existing_value, tag, *, clobber_template_tags=False):
+    prefer_list = "\n" in yaml_scalar(existing_value)
+    items = yaml_list_items(existing_value)
+
+    if clobber_template_tags:
+        items = [item for item in items if item not in TEMPLATE_ONLY_TAGS]
+
+    tag = yaml_scalar(tag)
+    if tag and tag not in items:
+        items.append(tag)
+
+    return render_tags(items, prefer_list=prefer_list)
+
+def apply_surgical_merge(existing_data, new_data, *, is_new, canonical_name=""):
+    merged = dict(existing_data)
+
+    # Field-specific cleanup for residue produced by earlier parser runs.
+    # This does not treat blank input as data; it only refuses to preserve
+    # LinkedIn UI chrome such as "3rd" as a real company name.
+    if "company" in merged:
+        existing_company = yaml_scalar(merged.get("company", ""))
+        if existing_company and not plausible_company_name(existing_company):
+            merged["company"] = ""
+
+    if is_new:
+        # If a future version loads a people-page template, these are template
+        # defaults, not LinkedIn-derived data.  They must not leak into a new
+        # LinkedIn-created people object.
+        merged.pop("tags", None)
+
+    for key, value in new_data.items():
+        value = yaml_scalar(value)
+
+        # Apply the same validation at merge time.  This prevents bad company
+        # candidates from being written on create and also prevents bad incoming
+        # values from filling a blank existing company field.
+        if key == "company" and value and not plausible_company_name(value):
+            value = ""
+
+        if key == "tags":
+            merged[key] = ensure_tag(
+                merged.get(key, ""),
+                value or LINKEDIN_TAG,
+                clobber_template_tags=is_new,
+            )
+            continue
+
+        if key == "aliases":
+            merged[key] = merge_aliases(
+                merged.get(key, ""),
+                value,
+                canonical_name=canonical_name,
+            )
+            continue
+
+        # Blank input is not data. Never erase a populated field accidentally.
+        if not value:
+            if key not in merged:
+                merged[key] = ""
+            continue
+
+        if is_new:
+            # New page: LinkedIn import populates the page.
+            merged[key] = value
+        else:
+            # Existing page: fill blanks only. Do not overwrite populated YAML.
+            if not yaml_scalar(merged.get(key, "")):
+                merged[key] = value
+
+    if is_new:
+        merged["tags"] = ensure_tag(
+            merged.get("tags", ""),
+            LINKEDIN_TAG,
+            clobber_template_tags=True,
+        )
+
+    if "aliases" in merged:
+        merged["aliases"] = merge_aliases(
+            "",
+            merged.get("aliases", ""),
+            canonical_name=canonical_name,
+        )
+
+    return merged
+
+person = {}
+
+for m in re.finditer(
+    r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    text,
+    re.I | re.S,
+):
+    try:
+        obj = json.loads(html.unescape(m.group(1)))
+
+        if isinstance(obj, dict):
+            if obj.get("@type") == "Person":
+                person = obj
+                break
+
+    except Exception:
+        pass
+
+page_title = title_tag() or bash_page_title
+
+name = (
+    person.get("name")
+    or meta("og:title")
+    or page_title
+    or ""
+)
+
+name = re.sub(r"\s+\|\s+LinkedIn.*$", "", name).strip()
+
+if not name or name.casefold() == "unknown":
+    raise SystemExit(f"Could not extract profile name; got {name!r}, page_title={page_title!r}")
+
+if not name:
+    raise SystemExit("Could not extract profile name; refusing to create Unknown.md")
+
+parts = name.split()
+
+first = parts[0] if len(parts) > 0 else ""
+last = parts[-1] if len(parts) > 1 else ""
+middle = " ".join(parts[1:-1]) if len(parts) > 2 else ""
+
+def extract_experience_from_dom():
+    """
+    Pull current employer, current title, and company URL from the FIRST real
+    Experience entry in the rendered DOM.  Bounded strictly to the Experience
+    section -- LinkedIn marks each section heading with a stable
+    "StateCardAnchor_<Section>" anchor -- so editable headline/about/skills
+    free text cannot leak in.  Every real position is tied to a /company/<id>/
+    page.  Handles both observed card shapes:
+        multi-role (company header):  Company / "N yrs M mos" / Role / dates...
+        single-role:                  Role / Company [ · Full-time ] / dates...
+    Returns (company, title, company_url); any field may be "".
+    """
+    anchor = re.search(r"StateCardAnchor_Experience", text)
+    if not anchor:
+        return ("", "", "")
+    start = anchor.start()
+    nxt = re.search(r"StateCardAnchor_(?!Experience)[A-Za-z]+", text[start + 10:])
+    section = text[start: start + 10 + nxt.start()] if nxt else text[start:start + 20000]
+
+    company_url = ""
+    cu = re.search(r"https?://[^\"']*?/company/[^\"'/]+/?", section)
+    if cu:
+        company_url = html.unescape(cu.group(0)).rstrip("/") + "/"
+
+    flat = html.unescape(re.sub(r"<[^>]+>", "\n", section))
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in flat.split("\n")]
+    # The section slice begins mid-tag, so the heading token arrives as
+    # 'StateCardAnchor_Experience">Experience'.  Strip the anchor-attribute
+    # prefix so the real heading/first line is recovered.
+    lines = [re.sub(r'^.*?StateCardAnchor_\w+"?>?', "", ln).strip() for ln in lines]
+    lines = [ln for ln in lines if ln]
+    if lines and lines[0].casefold() == "experience":
+        lines = lines[1:]
+    if not lines:
+        return ("", "", company_url)
+
+    tenure = re.compile(r"^\d+\s*yrs?(\s+\d+\s*mos?)?$|^\d+\s*mos?$", re.I)
+    datey = re.compile(
+        r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\b|\bPresent\b", re.I
+    )
+    locish = re.compile(r"(United States|Remote|On-site|On site|Hybrid|Greater|Area|·)", re.I)
+    emptype = re.compile(
+        r"^(Full-time|Part-time|Contract|Self-employed|Freelance|Internship|"
+        r"Temporary|Apprenticeship)$", re.I
+    )
+
+    company = ""
+    title = ""
+    if len(lines) >= 2 and tenure.match(lines[1]):
+        # Multi-role company-header card: company first, then tenure, then roles.
+        company = lines[0]
+        for cand in lines[2:7]:
+            if tenure.match(cand) or datey.search(cand) or locish.search(cand):
+                continue
+            if emptype.match(cand) or experience_stop_line(cand):
+                continue
+            title = cand
+            break
+    else:
+        # Single-role card: title first, then company (optionally "· Full-time").
+        title = lines[0]
+        company = lines[1] if len(lines) >= 2 else ""
+
+    company = clean_company_candidate(company)
+    company = re.sub(r"\s+\d+\s*yrs?(\s+\d+\s*mos?)?$", "", company, flags=re.I).strip()
+    return (company.strip(), title.strip(), company_url)
+
+exp_company, exp_title, company_url = extract_experience_from_dom()
+
+title = exp_title
+og_description = meta("og:description")
+
+page_title_headline, page_title_company = headline_from_page_title(page_title, name)
+
+# Strongest fallback: the normal LinkedIn browser-title convention:
+#   Name - Current Position Title - Company | LinkedIn
+if not title and page_title_headline:
+    title = page_title_headline
+    # Do not trust the LinkedIn header/title for company.  Company comes only
+    # from the first listed Experience/job entry below.
+
+# Weaker but still useful: public/search LinkedIn often exposes only:
+#   Name - Profile Headline | LinkedIn
+# Treat that as title only.  Never infer company from it.
+if not title:
+    title = one_part_headline_from_page_title(page_title, name)
+
+# If the top card is visible in the fetched page, use the displayed headline as
+# title.  This is intentionally title-only; company still comes from explicit
+# company/experience data.
+if not title:
+    title = extract_topcard_headline(name)
+
+# Some LinkedIn pages expose a compact phrase like "Title at Company" in
+# og:description.  Use it for title only; company still comes only from the
+# first listed Experience/job entry.
+if not title:
+    compact_title, compact_company = split_title_company_from_compact_headline(og_description)
+    if compact_title:
+        title = compact_title
+
+if not title:
+    m = re.search(
+        r'<p[^>]*>\s*<span>([^<]+(?: at |\s\|\s)[^<]+)</span>\s*</p>',
+        text,
+        re.I | re.S
+    )
+
+    if m:
+        compact_title, compact_company = split_title_company_from_compact_headline(
+            html.unescape(m.group(1)).strip()
+        )
+        title = compact_title or title
+
+# Prefer the first listed Experience/job entry for company.  If LinkedIn's
+# public layout does not expose a usable Experience company, fall back to
+# conservative title/top-card sources.  This handles profiles where the top card
+# says e.g. "Sales Professional at UWorld" but Experience is hidden/truncated.
+company = exp_company or extract_company_from_experience(name, title)
+if not company:
+    company = extract_company_from_title_sources(name, title, page_title, og_description)
+
+title = title.strip()
+company = company.strip()
+
+# Final gate: every extraction path, including structured JSON-LD and
+# late regex fallbacks, must pass the same company validator.  This prevents
+# LinkedIn UI chrome such as "3rd" or "· 3rd" from reaching YAML even if
+# it came from a path that bypassed plausible_company_name().
+if company and not plausible_company_name(company):
+    company = ""
+
+if not company:
+    try:
+        Path("/tmp/parse_li_visible_lines.txt").write_text("\n".join(visible_text_lines()), encoding="utf-8")
+        print("WARNING no LinkedIn company extracted; visible lines saved to /tmp/parse_li_visible_lines.txt", file=sys.stderr)
+    except Exception:
+        pass
+
+title_pos = text.find("<title>")
+name_pos = text.find(name)
+
+if title_pos >= 0:
+    window = text[title_pos:title_pos + 50000]
+
+    matches = re.findall(
+        r'https://media\.licdn\.com/[^,"\s>]*profile-displayphoto[^,"\s>]*',
+        window,
+        re.I
+    )
+
+    if matches:
+        m = re.search(
+            r'https://media\.licdn\.com/[^,"\s>]+profile-displayphoto-shrink_800_800[^,"\s>]+',
+            window,
+            re.I,
+        )
+
+        if m:
+            photo = html.unescape(m.group(0)).split()[0]
+
+if not photo:
+    if name_pos >= 0:
+        # Search only near the profile owner's top card
+        window = text[name_pos:name_pos + 20000]
+
+        matches = re.findall(
+            r'https://media\.licdn\.com/[^,"\s>]*profile-displayphoto[^,"\s>]*',
+            window,
+            re.I
+        )
+
+        if matches:
+            photo = html.unescape(matches[-1])
+
+slug = profile_url.rstrip("/").split("/")[-1]
+
+headline = f"{title} at {company}" if title and company else title
+headline_pos = text.find(headline)
+
+def visible_lines(fragment):
+    fragment = re.sub(r"<script.*?</script>", " ", fragment, flags=re.I | re.S)
+    fragment = re.sub(r"<style.*?</style>", " ", fragment, flags=re.I | re.S)
+    fragment = re.sub(r"<svg.*?</svg>", " ", fragment, flags=re.I | re.S)
+    fragment = re.sub(r"<[^>]+>", "\n", fragment)
+    fragment = html.unescape(fragment)
+
+    lines = []
+    for line in fragment.splitlines():
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            lines.append(line)
+    return lines
+
+
+def looks_like_person_location(line):
+    if not line:
+        return False
+
+    bad = {
+        name,
+        title,
+        company,
+        f"{title} at {company}",
+        "More",
+        "Message",
+        "Contact info",
+    }
+
+    if line in bad:
+        return False
+
+    if len(line) > 120:
+        return False
+
+    # Common LinkedIn location formats:
+    # Boston, Massachusetts, United States
+    # Dallas-Fort Worth Metroplex
+    # Greater Chicago Area
+    # Toronto, Ontario, Canada
+    # London, England, United Kingdom
+    patterns = [
+        r"^[A-Z][A-Za-z .'-]+,\s*[A-Z][A-Za-z .'-]+,\s*[A-Z][A-Za-z .'-]+$",
+        r"^[A-Z][A-Za-z .'-]+,\s*[A-Z][A-Za-z .'-]+$",
+        r"\bMetroplex\b",
+        r"\bMetropolitan Area\b",
+        r"^Greater .+ Area$",
+    ]
+
+    return any(re.search(p, line) for p in patterns)
+
+
+
+headline = f"{title} at {company}" if title and company else title
+anchor_pos = text.find(headline)
+
+if anchor_pos < 0 and title:
+    anchor_pos = text.find(title)
+
+if anchor_pos < 0:
+    anchor_pos = text.find(name)
+
+if anchor_pos >= 0:
+    window = text[anchor_pos:anchor_pos + 50000]
+    lines = visible_lines(window)
+
+    for line in lines[:120]:
+        if looks_like_person_location(line):
+            person_location = line
+            break
+
+if company and person_location:
+    company_location_query = f"{company} {person_location}"
+    company_location_url = (
+        "https://www.google.com/maps/search/"
+        + urllib.parse.quote_plus(company_location_query)
+    )
+
+if company_location_url:
+    maps_html = devtools_fetch(company_location_url)
+    maps_text = html.unescape(maps_html)
+
+    # Debug while testing
+    Path("/tmp/google_maps.txt").write_text(maps_text)
+    # print("DEBUG saved Google Maps text to /tmp/google_maps.txt")
+    # print(f"DEBUG maps_text length={len(maps_text)}")
+    # Path("/tmp/google_maps.html").write_text(maps_html)
+    # Look for US address shape:
+    # 501 Boylston St 3rd Floor, Boston, MA 02116
+    m = re.search(
+        r'(\d{1,6}\s+[A-Za-z0-9 .\'-]+?(?:St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Way|Pl|Place|Pkwy|Parkway|Trail|Tr|Circle|County Rd|County Road|CR)(?:[^\n,]*?)?)'
+        r'(?:,|\n|\s{2,})\s*'
+        r'([A-Z][A-Za-z .\'-]+)'
+        r'(?:,|\n|\s{2,})\s*'
+        r'([A-Z]{2})\s+'
+        r'(\d{5}(?:-\d{4})?)',
+        maps_text,
+        re.I,
+    )
+
+    if m:
+        maps_street = re.sub(r"\s+", " ", m.group(1)).strip()
+        maps_city = re.sub(r"\s+", " ", m.group(2)).strip()
+        maps_state = m.group(3).strip()
+        maps_zip = m.group(4).strip()
+        maps_country = "United States"
+
+    p = re.search(
+        r'(\(\d{3}\)\s*\d{3}-\d{4})',
+        maps_text
+    )
+
+    if p:
+        company_phone = p.group(1)
+
+
+NICKNAME_CANON = {
+    "zac": "zachary",
+    "zach": "zachary",
+    "zack": "zachary",
+    "zachary": "zachary",
+    "bill": "william",
+    "billy": "william",
+    "will": "william",
+    "william": "william",
+    "bob": "robert",
+    "bobby": "robert",
+    "rob": "robert",
+    "robert": "robert",
+    "jim": "james",
+    "jimmy": "james",
+    "james": "james",
+    "mike": "michael",
+    "michael": "michael",
+    "dave": "david",
+    "david": "david",
+    "tom": "thomas",
+    "tommy": "thomas",
+    "thomas": "thomas",
+    "johnny": "john",
+    "john": "john",
+}
+
+
+def name_tokens(value):
+    return re.findall(r"[a-z0-9]+", yaml_scalar(value).casefold())
+
+
+def canon_first(value):
+    toks = name_tokens(value)
+    if not toks:
+        return ""
+    return NICKNAME_CANON.get(toks[0], toks[0])
+
+
+def edit_distance_leq_one(a, b):
+    a = yaml_scalar(a).casefold()
+    b = yaml_scalar(b).casefold()
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    i = j = edits = 0
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        if len(a) == len(b):
+            i += 1
+            j += 1
+        elif len(a) > len(b):
+            i += 1
+        else:
+            j += 1
+    if i < len(a) or j < len(b):
+        edits += 1
+    return edits <= 1
+
+
+def name_match_score(profile_name, candidate_name):
+    pt = name_tokens(profile_name)
+    ct = name_tokens(candidate_name)
+    if not pt or not ct:
+        return 0
+
+    pf = canon_first(profile_name)
+    cf = canon_first(candidate_name)
+    pl = pt[-1]
+    cl = ct[-1]
+
+    score = 0
+    if pf and cf and pf == cf:
+        score += 60
+    elif pt[0] == ct[0]:
+        score += 45
+    else:
+        return 0
+
+    if pl == cl:
+        score += 60
+    elif edit_distance_leq_one(pl, cl):
+        score += 50
+    else:
+        return 0
+
+    # Prefer fuller canonical names when LinkedIn uses a short form.
+    if len(ct) > len(pt):
+        score += 5
+
+    return score
+
+
+def candidate_names_from_frontmatter(path, data):
+    names = [path.stem]
+
+    fm_name = " ".join(
+        yaml_scalar(data.get(k, ""))
+        for k in ("first_name", "middle_name", "last_name")
+        if yaml_scalar(data.get(k, ""))
+    ).strip()
+    if fm_name:
+        names.append(fm_name)
+
+    for alias in split_alias_values(data.get("aliases", "")):
+        names.append(alias)
+
+    # Existing LinkedIn slug can also identify a page on repeat runs.
+    existing_slug = yaml_scalar(data.get("linkedin_slug", ""))
+    if existing_slug:
+        names.append(existing_slug.replace("-", " "))
+
+    cleaned = []
+    for n in names:
+        n = re.sub(r"\s+", " ", yaml_scalar(n)).strip()
+        if n and n not in cleaned:
+            cleaned.append(n)
+    return cleaned
+
+
+def resolve_people_page(profile_name, profile_slug, people_dir):
+    safe = re.sub(r'[\\/:*?"<>|]', '', profile_name).strip()
+    direct = people_dir / f"{safe}.md"
+
+    profile_key = normalize_alias_key(profile_name)
+
+    # Highest-priority resolver:
+    #   If any existing people page has aliases containing the exact LinkedIn
+    #   display name, use that page.  This is explicit user-maintained identity
+    #   data and beats direct filename creation and fuzzy matching.
+    alias_hits = []
+    if people_dir.exists() and profile_key:
+        for path in people_dir.glob("*.md"):
+            if path.name.startswith("."):
+                continue
+            try:
+                data, _order, _body = parse_frontmatter(path.read_text(errors="ignore"))
+            except Exception:
+                data = {}
+
+            for alias in split_alias_values(data.get("aliases", "")):
+                if normalize_alias_key(alias) == profile_key:
+                    alias_hits.append((path, alias))
+                    break
+
+    if len(alias_hits) == 1:
+        path, alias = alias_hits[0]
+        print(f"Resolved LinkedIn profile {profile_name!r} to existing page {path} (exact aliases match {alias!r})")
+        return path, f"exact aliases match {alias!r}"
+
+    if len(alias_hits) > 1:
+        print("Ambiguous exact alias matches for LinkedIn profile:", file=sys.stderr)
+        for path, alias in alias_hits:
+            print(f"  {path} aliases: {alias!r}", file=sys.stderr)
+        raise SystemExit("Refusing to choose between duplicate exact aliases.")
+
+    # Repeat-run URL/slug resolver.  This also beats direct filename creation.
+    # If the exact LinkedIn URL or slug is already on a people page, use it.
+    url_hits = []
+    if people_dir.exists():
+        for path in people_dir.glob("*.md"):
+            if path.name.startswith("."):
+                continue
+            try:
+                data, _order, _body = parse_frontmatter(path.read_text(errors="ignore"))
+            except Exception:
+                data = {}
+
+            existing_slug = yaml_scalar(data.get("linkedin_slug", ""))
+            existing_url = yaml_scalar(data.get("linkedin", ""))
+            if profile_slug and existing_slug and profile_slug == existing_slug:
+                url_hits.append((path, "same linkedin_slug"))
+            elif profile_url and existing_url and profile_url.rstrip("/") == existing_url.rstrip("/"):
+                url_hits.append((path, "same linkedin URL"))
+
+    unique_url_hits = []
+    seen_paths = set()
+    for path, why in url_hits:
+        if path in seen_paths:
+            continue
+        unique_url_hits.append((path, why))
+        seen_paths.add(path)
+
+    if len(unique_url_hits) == 1:
+        path, why = unique_url_hits[0]
+        print(f"Resolved LinkedIn profile {profile_name!r} to existing page {path} ({why})")
+        return path, why
+
+    if len(unique_url_hits) > 1:
+        print("Ambiguous LinkedIn URL/slug matches:", file=sys.stderr)
+        for path, why in unique_url_hits:
+            print(f"  {path} ({why})", file=sys.stderr)
+        raise SystemExit("Refusing to choose between duplicate LinkedIn URL/slug matches.")
+
+    # If the LinkedIn display-name file already exists, use it.
+    if direct.exists():
+        return direct, "direct LinkedIn display-name match"
+
+    # Last resort: fuzzy/nickname resolver for cases without explicit aliases.
+    best = []
+    if people_dir.exists():
+        for path in people_dir.glob("*.md"):
+            if path.name.startswith("."):
+                continue
+            try:
+                data, _order, _body = parse_frontmatter(path.read_text(errors="ignore"))
+            except Exception:
+                data = {}
+
+            score = 0
+            why = []
+
+            # Fuzzy matching may consider filename/frontmatter/aliases, but exact
+            # alias matching above is the authoritative alias path.
+            for cand in candidate_names_from_frontmatter(path, data):
+                s = name_match_score(profile_name, cand)
+                if s > score:
+                    score = s
+                    why = [f"name match {cand!r}"]
+
+            if score >= 100:
+                best.append((score, path, ", ".join(why) or "matched"))
+
+    best.sort(key=lambda x: x[0], reverse=True)
+    if len(best) == 1 or (len(best) > 1 and best[0][0] - best[1][0] >= 20):
+        print(f"Resolved LinkedIn profile {profile_name!r} to existing page {best[0][1]} ({best[0][2]}, score={best[0][0]})")
+        return best[0][1], best[0][2]
+
+    if best:
+        print("Ambiguous existing people-page matches for LinkedIn profile:", file=sys.stderr)
+        for score, path, why in best[:8]:
+            print(f"  score={score} {path} ({why})", file=sys.stderr)
+        raise SystemExit("Refusing to choose an ambiguous people page.")
+
+    return direct, "new page from LinkedIn display name"
+
+
+people_dir = Path(obsidian) / "people"
+outfile, outfile_reason = resolve_people_page(name, slug, people_dir)
+safe_name = outfile.stem
+
+if not safe_name:
+    raise SystemExit("Could not determine safe filename; refusing to create Unknown.md")
+
+outfile.parent.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+assets_dir = Path(obsidian) / "people" / "assets"
+photo_asset = download_profile_photo(photo, assets_dir, slug)
+
+# Legacy lookup code below can still mutate company.  Apply the same final
+# validator immediately before constructing frontmatter.
+company = yaml_scalar(company)
+if company and not plausible_company_name(company):
+    company = ""
+
+new_fm = {
+    "first_name": first,
+    "middle_name": middle,
+    "last_name": last,
+    "street": maps_street,
+    "city": maps_city,
+    "state": maps_state,
+    "country": maps_country,
+    "zip": maps_zip,
+    "phone": "",
+    "company_phone": company_phone,
+    "home_email": "",
+    "work_email": "",
+    "birthday": "",
+    "title": title,
+    "tags": LINKEDIN_TAG,
+    "person_location": person_location,
+    "company_location_query": company_location_query,
+    "company_location_url": company_location_url,
+    "company": company,
+    "company_url": yaml_scalar(company_url),
+    "aliases": name,
+    "linkedin_slug": slug,
+    "linkedin": profile_url,
+    "date": date.today().isoformat(),
+}
+
+#print(f"DEBUG page_title={page_title!r}")
+#print(f"DEBUG bash_page_title={bash_page_title!r}")
+#print(f"DEBUG extracted_name={name!r}")
+#print(f"DEBUG safe_name={safe_name!r}")
+#print(f"DEBUG outfile={outfile!s}")
+#print(f"DEBUG title={title!r}")
+#print(f"DEBUG company={company!r}")
+
+default_order = list(new_fm.keys())
+
+if outfile.exists():
+    old_text = outfile.read_text(errors="ignore")
+    old_fm, old_order, body = parse_frontmatter(old_text)    
+
+    merged_fm = apply_surgical_merge(old_fm, new_fm, is_new=False, canonical_name=outfile.stem)
+
+    # Preserve existing field order, append new fields at end.
+    order = old_order[:]
+    for key in default_order:
+        if key not in order:
+            order.append(key)
+
+    body = update_body_profile_picture(body, photo_asset)
+    outfile.write_text(render_frontmatter(merged_fm, order) + body)
+
+else:
+    body = "\n".join([
+        f"![|250](assets/{photo_asset})" if photo_asset else "![|250]()",
+        "",
+        "```dataview",
+        'TABLE WITHOUT ID file.name as "full name", title, phone, work_email',
+        'FROM "people"',
+        "WHERE file.name = this.file.name",
+        "```",
+        ""
+    ])
+
+    merged_fm = apply_surgical_merge({}, new_fm, is_new=True, canonical_name=outfile.stem)
+    outfile.write_text(render_frontmatter(merged_fm, default_order) + body)
+
+print(outfile)
+
+PY

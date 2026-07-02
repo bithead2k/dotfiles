@@ -1,0 +1,22 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: long_query
+# 
+#         USAGE: ./long_query 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: id_{customer} and webfinish.pem loaded with ssh-add
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 01/11/2018 12:53
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+cat ~/source/sql/long_query.sql | ssh -tF ~/.ssh/ssh_config $1 sudo -iu postgres 'psql -qA'

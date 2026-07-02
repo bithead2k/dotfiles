@@ -1,0 +1,251 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  get_pics_lib
+# 
+#         USAGE:  ./get_pics_lib 
+# 
+#   DESCRIPTION:  adb function library for camera pic downloads
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  07/25/2022 11:52:19 AM CDT
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                                  # treat unset variables as errors
+IFS=$'\n'
+#===============================================================================
+#   GLOBAL DECLARATIONS
+#===============================================================================
+declare -rx SCRIPT=${0##*/}                     # the name of this script
+declare -rx mkdir='/bin/mkdir'                  # the mkdir(1) command
+ScriptVersion="4.0"
+dcim_path=/storage/self/primary/DCIM/Camera
+gallery_path=/storage/emulated/0/Pictures/Messages
+whatsapp=/storage/self/primary/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp\ Images
+facebook=/storage/self/primary/DCIM/Facebook
+screenshots=/storage/self/primary/DCIM/Screenshots
+screenshots1="/storage/self/primary/DCIM/Screenshots (1)"
+pictures=/storage/self/primary/Pictures
+messages=/storage/self/primary/Pictures/Messages
+chatgpt=/storage/self/primary/Pictures/ChatGPT
+frostbank=/storage/self/primary/Documents/Frost
+#dcim_path="/storage/self/primary/Pictures/Canon EOS 6D Mark II"
+today=$(date +'%Y%m%d')
+pic_extension=jpg
+search_paths=()
+search_paths+=($dcim_path)
+search_paths+=($gallery_path)
+search_paths+=($whatsapp)
+search_paths+=($facebook)
+search_paths+=($screenshots)
+search_paths+=("$screenshots1")
+search_paths+=($pictures)
+search_paths+=($messages)
+search_paths+=($chatgpt)
+search_paths+=($frostbank)
+
+#===============================================================================
+#   SANITY CHECKS
+#===============================================================================
+if [ -z "$BASH" ] ; then
+    printf "$SCRIPT:$LINENO: run this script with the BASH shell\n" >&2
+    exit 192
+fi
+
+if [ ! -x "$mkdir" ] ; then
+    printf "$SCRIPT:$LINENO: command '$mkdir' not available - aborting\n" >&2
+    exit 192
+fi
+
+#===============================================================================
+#   MAIN SCRIPT
+#===============================================================================
+
+
+#===  FUNCTION  ================================================================
+#          NAME:  die
+#   DESCRIPTION:  throw an error and exit
+#    PARAMETERS:  error code to throw, the rest is a message
+#       RETURNS:  exits the script
+#===============================================================================
+function die()
+{
+  # catch the exit code
+  retval=$1
+  shift
+  # output everything else to stderr
+  echo -e "$@" >&2
+  # abend
+  exit $retval
+}    # ----------  end of function die  ----------
+
+function warn()
+{
+  # catch the exit code
+  retval=$1
+  shift
+  # output everything else to stderr
+  echo -e "$@" >&2
+  # abend
+  return $retval
+}
+
+#===  FUNCTION  ================================================================
+#          NAME:  read_config
+#   DESCRIPTION:  read a configuration file in bash format
+#  parameter=value
+#    PARAMETERS:  file name
+#       RETURNS:  parameters are set in config file
+#===============================================================================
+function read_config(){
+
+   #  dcim_path=/path/to/pictures/on/camera/
+
+    [[ -f "$1" ]] && source "$1" || die 3 "Could not find config file $1"
+
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options:
+  -c|config [file] Read parameters from a configuration file
+  -d|dir    [name] Change the path to files on the camera (default: ${dcim_path})
+  -e|ext    [name] Change the default filename extension (default: ${pic_extension})
+  -t|target [name] Change the destination directory (default: ${today})
+  -h|help          Display this message
+  -v|version       Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":c:d:e:ht:v" opt
+do
+  case $opt in
+
+    c|config   )  read_config "$OPTARG";;
+
+    d|dir      )  dcim_path="${OPTARG// /\\ }";;
+
+    e|ext      )  pic_extension="$OPTARG";;
+
+    h|help     )  usage; exit 0   ;;
+
+    t|target   )  today="$OPTARG";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+export pic_list=
+export studio_path=~/Pictures/${today}
+export presence_check=$(adb shell exit 2>&1)
+pic_extension_upper=${pic_extension^^}
+mkdir -p $studio_path && cd $studio_path || die 2 "Could not make directory $studio_path"
+
+[[ $presence_check == '' ]] || die 3 "No adb device found"
+
+function get_pics() {
+    local dir="$1"
+    local pic_list
+
+    # Get list of jpg (case insensitive)
+    pic_list=$(adb shell "ls \"$dir\"/*.${pic_extension} 2>/dev/null || ls \"$dir\"/*.${pic_extension_upper} 2>/dev/null")
+
+    [[ -z "$pic_list" || "$pic_list" == *"No such file or directory"* ]] && {
+        warn 1 "Nothing to transfer from $dir"
+        return
+    }
+
+    # Process each file safely (null-terminated would be even better, but this works for most cases)
+    while IFS= read -r pic; do
+        [[ -z "$pic" ]] && continue
+
+        echo "Pulling: $pic"
+        adb pull "$pic" . || warn 1 "Failed to pull $pic"
+
+        # Delete from device (quote the full remote path)
+        adb shell "rm \"$pic\"" || warn 1 "Failed to delete $pic"
+
+    done <<< "$pic_list"
+}
+
+#function get_pics() {
+#
+#pic_list=
+#dcim_path="$@"
+#
+#pic_list=$(adb shell ls "$dcim_path/*.${pic_extension}" 2>&1 | 
+#    sed -e 's/[^[:print:]]*//g')
+#[[ "$pic_list" == *"No such file or directory"* ]] && { 
+#    pic_list=$(adb shell ls "$dcim_path/*.${pic_extension_upper}" 2>&1 | 
+#        sed -e 's/[^[:print:]]*//g')
+#}
+#
+#[[ "$pic_list" == '' ]] && warn 1 "Nothing to transfer"
+#[[ "$pic_list" == *"No such file or directory"* ]] && warn 1 "Nothing to transfer"
+#
+#IFS=$'\n'
+#for pic in ${pic_list[@]} 
+#do
+#
+#    # Money line
+#    adb pull "$pic" .
+##   adb pull "\"$pic\"" .   
+#    pic=${pic// /\\ }
+#    pic=${pic//\(/\\(}
+#    pic=${pic//\)/\\)}
+#    adb shell rm "$pic"
+##   adb shell rm "\"$pic"\"
+#
+#done
+#
+## cleanup the files names with parenthesis
+## Strip the closing and convert the opening to '_'
+#for rename in $(ls -1 *\).* 2>/dev/null)
+#do
+#    mv $rename ${rename//)/}
+#done
+#for rename in $(ls -1 *\(* 2>/dev/null)
+#do
+#    mv "$rename" "${rename//\(/_}"
+#    [[ $rename == ${rename// /} ]] || mv "$rename" "${rename// /}"
+#done
+#
+#}
+
+for pic_path in ${search_paths[@]}
+do
+    get_pics "$pic_path"
+
+done
+
+echo "Pictures are now located in ${studio_path} and deleted from camera."
+
+#===============================================================================
+#   STATISTICS / CLEANUP
+#===============================================================================
+exit 0

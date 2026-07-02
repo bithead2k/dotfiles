@@ -1,0 +1,3 @@
+#!/opt/local/bin/bash
+
+printf 'kirk.roybal@wolterskluwer.com\nClaude2Hopper!\nphone\n' | /opt/cisco/anyconnect/bin/vpn -s connect 'mmcloudanyconnfwf01.navisite.net'

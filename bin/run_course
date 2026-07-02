@@ -1,0 +1,132 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: run_course
+# 
+#         USAGE: ./run_course 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 01/28/2020 07:53
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+ScriptVersion="1.0"
+day=()
+outfile="current.pdf"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} -c {course conf} [options] [--] 
+
+  Options: 
+  -c|course file Name of course conf file 
+  -h|help        Display this message
+  -p|pdf    file File name that OBS is broadcasting
+  -v|version     Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+#-----------
+#  Simple Functions
+#-----------
+function die() {
+	echo -e "$@"
+	exit 1
+}
+
+function lower() {
+    echo "$@" | tr '[:upper:]' '[:lower:]'
+}
+
+function deserialize_course() {
+# read course definition file
+
+#  course definition file looks like:
+#
+#  Immersion Gianni.conf
+# course_days=5
+# course_name="Custom Curricuulum"
+# day=()
+# day+=(100PostgreSQL_Intro,120DatabaseAdministration,130UserAdministration,135DCL,140UserDataObjects,110ServerConfig)
+# day+=(170Monitoring,180VacuumFreeze,190Maintenance,200ServerArch_and_Tuning)
+# day+=(200ServerArch_and_Tuning,280Indexes,310ReplicationOverview,320ReplicationTerminology,330ReplicationTransport,340ReplicationStartupSetup,350ReplicationDisconnectionReconnection,360ReplicationSwitchover,370PhysicalStreamingReplication)
+# day+=(460PhysicalBackup,470PointInTimeRecovery,480Barman,300LogicalBackup)
+# day+=(420LogicalDecoding,370LogicalStreamingReplication,410BDR,430OnlineUpgrade)
+
+classfile="${1:-course.conf}"
+[[ -f "$classfile" ]] || return 1
+# IFS=$'\n'
+for line in $(<"$classfile")
+do
+eval "$line"
+done
+}
+
+function run_slides() {
+for (( i=0; i<course_days;i++ ))
+do
+  (( j=i+1 ))
+  #remove spaces
+  classes=${day[${i}]// /}
+  #split to array
+  classes=(${classes//,/ })
+  flag=0
+  for class in "${classes[@]}"
+  do
+      read -p "Press enter to activate: $class [n to exit]" next_course
+      [[ $next_course == "n" ]] && exit
+      cp "$class-1s.pdf" "${outfile}"
+  done
+done
+
+
+}
+
+#-----------
+#  Defaults
+#-----------
+course="course"
+
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":c:hp:v" opt
+do
+  case $opt in
+
+    c|course   )  
+        [[ -f $OPTARG.conf ]] || die "Could not find course file $OPTARG.conf"
+        deserialize_course "$OPTARG.conf"
+        ;;
+
+    h|help     )  usage; exit 0   ;;
+
+    p|pdf      )  outfile=$OPTARG ;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+[[ ${#day[@]} -gt 0 ]] && run_slides || die "No slides found"

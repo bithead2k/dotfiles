@@ -1,0 +1,177 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  get_video_lib
+# 
+#         USAGE:  ./get_video_lib 
+# 
+#   DESCRIPTION:  adb function library for camera video downloads
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  07/25/2022 02:06:57 PM CDT
+#      REVISION:  ---
+#===============================================================================
+set -o nounset                                  # treat unset variables as errors
+# shopt -s extendedglob
+shopt -s nocaseglob
+
+#===============================================================================
+#   GLOBAL DECLARATIONS
+#===============================================================================
+declare -rx SCRIPT=${0##*/}                     # the name of this script
+declare -rx mkdir='/bin/mkdir'                  # the mkdir(1) command
+ScriptVersion="3.0"
+dcim_paths="/storage/self/primary/DCIM/Camera
+/storage/self/primary/DCIM/DJI\ Album
+/storage/self/primary/Pictures/Canon\ EOS\ 6D\ Mark\ II"
+today=$(date +'%F')
+vid_extension=mp4
+# Path to photos on this specific camera
+studio_path=~/Pictures/portable_studio/${today}
+presence_check=$(adb shell exit 2>&1)
+
+#===============================================================================
+#   SANITY CHECKS
+#===============================================================================
+if [ -z "$BASH" ] ; then
+    printf "$SCRIPT:$LINENO: run this script with the BASH shell\n" >&2
+    exit 192
+fi
+
+if [ ! -x "$mkdir" ] ; then
+    printf "$SCRIPT:$LINENO: command '$mkdir' not available - aborting\n" >&2
+    exit 192
+fi
+
+#===============================================================================
+#   MAIN SCRIPT
+#===============================================================================
+
+#===  FUNCTION  ================================================================
+#          NAME:  die
+#   DESCRIPTION:  throw an error and exit
+#    PARAMETERS:  error code to throw, the rest is a message
+#       RETURNS:  exits the script
+#===============================================================================
+function die()
+{
+  # catch the exit code
+  retval=$1
+  shift
+  # output everything else to stderr
+  echo -e "$@" >&2
+  # abend
+  exit $retval
+}    # ----------  end of function die  ----------
+
+function concat_ws(){
+# Thanks, SO.  https://stackoverflow.com/questions/1527049/how-can-i-join-elements-of-an-array-in-bash
+  local d=${1-} f=${2-}
+  if shift 2; then
+    printf %s "$f" "${@/#/$d}"
+  fi
+}
+
+#===  FUNCTION  ================================================================
+#          NAME:  read_config
+#   DESCRIPTION:  read a configuration file in bash format
+#    PARAMETERS:  file name
+#       RETURNS:  local variables populated from file
+#===============================================================================
+function read_config(){
+
+    # dcim_path=/path/to/the/videos
+    # studio_path=/path/to/place/files
+    # vid_extension=file extension (e.g. mp4)
+
+    [[ -f "$1" ]] && source "$1" || die 3 "Could not find configuration file $1"
+
+}
+
+
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options:
+  -b|bash           Start bash debugger
+  -c|config [file]  Read variables from a config file
+  -d|dir [name]     Change the path to files on the camera (default: ${dcim_paths})
+  -e|ext [name]     Change the default filename extension (default: ${vid_extension})
+  -t|target [name]  change the destination directory (default: ${today})
+  -h|help           Display this message
+  -v|version        Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":bc:d:e:ht:v" opt
+do
+  case $opt in
+
+    b|bash     )  set -x;;
+
+    c|config   )  read_config "$OPTARG";;
+
+    d|dir      )  dcim_paths=$(echo "$OPTARG" | sed -e 's/ /\\ /g');;
+
+    e|ext      )  vid_extension="$OPTARG";;
+
+    h|help     )  usage; exit 0   ;;
+
+    t|target   )  today="$OPTARG";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+video_list=
+IFS=$'\n'
+for video_path in ${dcim_paths[@]}
+do
+    videos=
+    videos=$(adb shell "IFS=$'\n'; ls ${video_path}/*.mp4" 2>&1 | 
+        sed -e 's/[^[:print:]]*//g' \
+        -e 's/^[[:space:]]*//g' \
+        -e 's/ /\\ /g')
+    [[ $videos == *"No\ such\ file\ or\ directory"* ]] ||
+        export video_list=$(concat_ws "$IFS" "$video_list" "$videos")
+
+done
+
+[[ $video_list == '' ]] && die 2 "Nothing to transfer."
+[[ $presence_check == '' ]] || die 3 "No adb device found"
+
+mkdir -p $studio_path && cd $studio_path || die 2 "Could not make directory $studio_path"
+for video in ${video_list[@]}
+do
+    # need excaped spaces for every step except this one
+    adb pull -a "${video//\\/}" .  
+    adb shell rm "$video"
+done
+
+echo "Videos are now located in ${studio_path} and deleted from camera."
+
+#clean end
+exit 0

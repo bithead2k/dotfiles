@@ -1,0 +1,146 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  newperson
+# 
+#         USAGE:  ./newperson 
+# 
+#   DESCRIPTION:  Create a new person note
+#                   in the right directory
+#                   with a template
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/22/2023 09:46:14 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+
+ScriptVersion="1.0"
+# Assume AT&T
+company=a
+
+#===  FUNCTION  ================================================================
+#         NAME:  die
+#  DESCRIPTION:  Exit with a failure code
+#===============================================================================
+function die(){
+    retval=$1
+    shift
+    echo -e "$@"
+    exit $retval
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -a|att             Is an AT&T employee
+  -f|frost           Is a Frost employee
+  -h|help            Display this message
+  -n|newt            Is a Newt Global employee
+  -p|person   name   Name of the individual
+  -t|tech            Is a Tech Human employee
+  -v|version         Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":afhnp:tv" opt
+do
+  case $opt in
+
+    a|att      )  company=a;;
+
+    f|frost    )  company=f;;
+
+    h|help     )  usage; exit 0   ;;
+
+    n|newt     )  company=n;;
+
+    p|person   ) theguy="$OPTARG";;
+
+    t|tech     ) company=t;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+case $company in
+    a)url='@att.com';            tags="ATT";
+        street='208 S. Akard St.'; city='Dallas'; state='TX'; zip='75202';
+        business='"[[companies/AT&T]]"' ;;
+    f)url='@frostbank.com';      tags="Frost";
+        street='3838 Rogers'; city='San Antonio'; state='TX'; zip='78251';
+        business='"[[companies/Frost Bank|Frost Bank]]"' ;;
+    n)url='@newtglobalcorp.com'; tags="NewtGlobal";
+        street='1255 Corporate Dr, Suite 200'; city='Irving'; state='TX'; zip='75038';
+        business='"[[companies/Newt Global]]"' ;;
+    t)url='@techhuman.com';      tags="TechHuman";
+        street='110 E Houston St 7th Flr'; city='San Antonio'; state='TX'; zip='78205';
+        business='"[[Tech Quarry (SATO), LLC dba TechHuman]]"' ;;
+    *);;
+esac
+
+# echo $url $tags $street $city $state $zip $business $theguy
+
+peopledir=~/Documents/notes/people/
+personfile="${peopledir}${theguy}.md"
+
+[[ -f "${personfile}" ]] && die 1 "${theguy} already exists."
+
+cat <<EOF > "${personfile}"
+---
+first_name: ${theguy% *}
+middle_name: 
+last_name: ${theguy#* }
+street: ${street}
+city: ${city}
+state: ${state}
+zip: ${zip}
+country: USA
+phone: 
+home_email: 
+work_email: ${theguy% *}.${theguy#* }@$url
+birthday: 
+title: 
+tag: 
+ - $tags
+company: $business
+date: $(date +"%Y-%m-%d")
+aliases: ${theguy% *}
+
+---
+
+![]()
+
+\`\`\`dataview
+TABLE WITHOUT ID file.name as "full name", title, phone, work_email
+FROM "people"
+WHERE file.name = this.file.name
+\`\`\`
+
+Department: 
+Works for [[]]
+
+EOF

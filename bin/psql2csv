@@ -1,0 +1,85 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: psql2csv
+# 
+#         USAGE: ./psql2csv 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk@webfinish.com
+#  ORGANIZATION: 
+#       CREATED: 12/20/2016 09:37
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+
+
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -c|command [sql]    Query 
+  -d|db	     [name]   Database
+  -h|host    [name]   Hostname
+  -u|user    [name]   Username
+  
+  -v|version    Display script version
+
+	EOT
+	exit 1
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+[[ $# -eq 0 ]] && usage
+
+sql=
+database=
+hostname=
+username=
+
+while getopts ":c:d:h:u:v" opt
+do
+  case $opt in
+
+    c|command  )   sql="$OPTARG";;
+    d|db       )   database="$OPTARG";;
+    h|host     )   hostname="$OPTARG";;
+    u|user     )   username="$OPTARG";;
+
+    #h|help     )  usage; exit 0   ;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+
+[[ "$sql" == "" ]] && usage
+[[ "$database" == "" ]] && usage
+[[ "$hostname" == "" ]] && usage
+[[ "$username" == "" ]] && usage
+
+psql -h $hostname -U $username $database -qtAc "COPY ($sql) TO STDOUT WITH CSV HEADER"

@@ -1,0 +1,2 @@
+#!/bin/bash
+xclock -digital -fg white -bg black -twentyfour -padding 0 -face "Arial Black-60:bold" -update 1

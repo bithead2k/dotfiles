@@ -1,0 +1,61 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  newarticle
+# 
+#         USAGE:  ./newarticle 
+# 
+#   DESCRIPTION:  Create a new article checklist in markdown
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/11/2023 01:30:09 AM CST
+#      REVISION:  ---
+#===============================================================================
+
+function die(){
+    retval=$1
+    shift
+    echo -e "$@"
+    exit $retval
+}
+articledir=~/Documents/notes/articles/
+articlefile="${articledir}Project Tracker - $@.md"
+
+header="---
+geometry:
+ - margin=1mm
+ - left=15mm
+title: \"$@\"
+---
+
+# $@
+
+## <subtitle>
+
+## Tracker
+
+**$(anno_domini)**
+
+          S  M  T  W  T  F  S  S
+ - [ ] —————————————————— · 01: pandoc_notes Journal Section
+ - [ ] —————————————————— · 02: Outline — Tentantive Content Sections
+ - [ ] —————————————————— · 03: Content Sections Planner Tracker
+ - [ ] —————————————————— · 04: Write the Sections
+ - [ ] —————————————————— · 05: Convert the article to GDoc
+ - [ ] —————————————————— · 06: Announce to Ana and James
+ - [ ] —————————————————— · 07: Proactively manage peer editing
+ - [ ] —————————————————— · 08: Release
+
+          S  M  T  W  T  F  S  S 
+
+ "
+
+echo -e "$header" > "${articlefile}"
+# gvim "${articlefile}"
+

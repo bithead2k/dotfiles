@@ -1,0 +1,133 @@
+#!/bin/bash -
+#===============================================================================
+#
+#          FILE: getpix
+# 
+#         USAGE: ./getpix 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk@webfinish.com
+#  ORGANIZATION: 
+#       CREATED: 04/08/2015 00:35
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+. "$(dirname "$(readlink -f "$0")")"/test_harness
+
+function die(){
+    retval=$1
+    shift
+    echo -e "$*" >&2
+    exit $retval
+
+}
+
+function find_dcim() {
+    #find the DCIM/Pix inode
+    [[ -d $1/DCIM ]] && return 0 || return 1
+}
+
+function make_header() {
+index=$pixdir/index.html
+
+cat <<EOF > $index
+<html>
+<head>
+<title>$today</title>
+</head>
+<body>
+<center><h1>$pixdir</h1></center>
+EOF
+}
+
+function make_footer() {
+cat <<EOF >> $index
+</body>
+</html>
+EOF
+}
+
+dcim=
+mount_dir='/Volumes'
+[[ -d $mount_dir ]] || mount_dir="/media/$USER"
+#figure out if an sdcard is mounted
+for sdcard in $mount_dir/*
+do
+    [[ "$sdcard" == "Macintosh HD" ]] && continue
+    find_dcim "$sdcard" && {
+        dcim="$sdcard/DCIM"
+        break
+    }
+done
+
+failures=0
+assert_condition "Found DCIM at $dcim" "echo $dcim" "exist"
+[[ $failures -gt 0 ]] && die 1 "Couldn't find DCIM"
+
+pix=$(ls -1 "$dcim" | sed -e '/EOSMISC/d' -e '/MUSIC/d' | head -n 1)
+pix=$dcim/$pix
+
+assert_condition "Found pix $pix" "[[ -d \"$pix\" ]]" "exit0"
+[[ $failures -gt 0 ]] && die 2 "Couldn't find directory $pix"
+
+#get the local destination
+today=$(date +"%Y%m%d")
+assert_condition "Today is $today" "echo $today" "exist"
+[[ $failures -gt 0 ]] && die 3 "Couldn't figure out what day it is."
+
+pixdir=~/Pictures/$today
+mkdir -p $pixdir
+
+assert_condition "Directory for pix $pixdir" "[[ -d $pixdir ]]" "exit0"
+[[ $failures -gt 0 ]] && die 4 "Couldn't create/find directory $pixdir"
+
+#get the highest numbered image and start from there.
+pushd "$pixdir" > /dev/null
+counter=$(find . -maxdepth 1 -iname '*.jpg' | sed 's_^\./__' | sort | tail -n 1 | sed -e 's/[^[:digit:]]//g' -e 's/^0*//')
+(( counter++ ))
+
+assert_condition "Current pic count in $pixdir is $counter" "echo $counter" "exist"
+[[ $failures -gt 0 ]] && die 5 "Couldn't count pics"
+
+
+popd > /dev/null 2>&1
+
+shopt -s nocaseglob
+for pic in "$pix"/*.[jJ][pP][gG]
+do
+	[[ -f "$pic" ]] || continue
+	fnum=$(seq -w $counter 9999 | head -n 1)
+	assert_condition "Formatted number is: $fnum" "echo $fnum" "exist"
+	ico="$pixdir/ico_$fnum.jpg"
+	img="$pixdir/img_$fnum.jpg"
+	assert_condition "Current file $img" "echo $img" "exist"
+	[[ $failures -gt 0 ]] && die 6 "Couldn't find file"
+	assert_condition "$img is new" "[[ -f $img ]]" "exit!0"
+	[[ $failures -gt 0 ]] && die 7 "img_$fnum already exists in $pixdir"
+	assert_condition "Extracting thumbnail ico_$fnum.jpg" "exiftool -thumbnailimage -b '$pic' > '$ico'" "exit0"
+	[[ $failures -gt 0 ]] && die 8 "Couldn't create thumbnail $ico"
+	assert_condition "Moving $pic to \n\t$img" "mv '$pic' '$img'" "exit0"
+	[[ $failures -gt 0 ]] && die 9 "Couldn't move file $pic to $img"
+	(( counter++ ))
+done
+
+assert_condition "Making index file header" "make_header" "exit0"
+[[ $failures -gt 0 ]] && die 10 "Couldn't create index file with header"
+
+for pic in $pixdir/ico_*.jpg
+do
+	[[ -f $pic ]] || continue
+	assert_condition "Adding file: $pic" "echo \"<div style='float:left'><a href='$(basename ${pic//ico/img})'><img src='$(basename ${pic})'/></br>$(basename ${pic//ico/img})</a></div>\" >> $index" "exit0"
+	[[ $failures -gt 0 ]] && die 11 "Couldn't add $pic"
+done
+
+
+assert_condition "Making index file footer" "make_footer" "exit0"
+[[ $failures -gt 0 ]] && die 12 "Couldn't add footer to $index"

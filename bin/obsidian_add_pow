@@ -1,0 +1,24 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  obsidian_add_pow
+# 
+#         USAGE:  ./obsidian_add_pow 
+# 
+#   DESCRIPTION:  Add the Person of the Week to a person profile
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  03/29/2023 10:51:25 AM CDT
+#      REVISION:  ---
+#===============================================================================
+
+person="${@:-$(xclip -o)}"
+pow=$(/home/kroybal/bin/pg_pow "$person")
+pow=$(xclip -o)
+/home/kroybal/bin/obsidian_cli -naf "people/${person}" -t "${pow}"

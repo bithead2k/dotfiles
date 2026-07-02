@@ -1,0 +1,24 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  phtml2md
+# 
+#         USAGE:  ./phtml2md 
+# 
+#   DESCRIPTION:  Convert psql -H output to markdown
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  invoke psql with -qHc 'QUERY' | phtml2md
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  12/30/2022 03:53:54 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+input=-
+[[ $# -ne 0 ]] && input="$1"
+
+cat ${input} | pandoc -f html -t markdown

@@ -1,0 +1,114 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  bf
+# 
+#         USAGE:  ./bf 
+# 
+#   DESCRIPTION:  find a shell script based on the contents
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  08/08/2022 03:21:47 PM CDT
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                                  # treat unset variables as errors
+
+ScriptList=
+DebugScript=0
+SystemSearch=0
+SystemRefresh=0
+ScriptVersion="1.0"
+ScriptLocation=~/.local/bf/system_scripts.lst
+[[ ! -f $ScriptLocation ]] && SystemRefresh=1
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -h|help       Display this message
+  -r|refresh    Refresh the list of system scripts
+  -s|system     Also search system scripts
+  -v|version    Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":dhrsv" opt
+do
+  case $opt in
+
+    d|debug    )  (( DebugScript++ )) ; [[ $DebugScript -gt 2 ]] && set -x ;;
+
+    h|help     )  usage; exit 0   ;;
+
+    r|refresh  ) (( SystemRefresh++ )) ;;
+
+    s|system   ) (( SystemSearch++ )) ;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+
+#===  FUNCTION  ================================================================
+#          NAME:  list_scripts
+#   DESCRIPTION:  list the bash scripts in a directory
+#    PARAMETERS:  directory name
+#       RETURNS:  newline delimited list of scripts with path
+#===============================================================================
+function list_scripts(){
+    pushd "$1" >/dev/null 2>&1 
+    find . -exec file {} \; | grep Bourne | 
+        sed -e 's/: Bourne.*$//' -e "s_^./_$1/_" | 
+        sort | uniq
+    popd >/dev/null 2>&1
+
+}
+
+#===  FUNCTION  ================================================================
+#          NAME:  find_scripts
+#   DESCRIPTION:  find a script based on the content
+#    PARAMETERS:  pipe in a list of scripts, parameters are the search token
+#       RETURNS:  matching scripts with a bit of context
+#===============================================================================
+function find_scripts(){
+    for searched in $(cat -)
+    do
+        grep -Hni "$*" "$searched" -B3 -A4 --color=auto
+    done
+}   # ------------                 ½
+
+
+function refresh_system_scripts ()
+{
+    list_scripts "/" 2>/dev/null > $ScriptLocation
+}    # ----------  end of function refresh_system_scripts  ----------
+
+# get a list of shell scripts
+## If there is a bin dir, read the scripts in it
+[[ -d ~/bin ]] && list_scripts ~/bin | find_scripts "$*"
+[[ $SystemRefresh -gt 0 ]] && refresh_system_scripts
+[[ $SystemSearch -gt 0 ]] && cat $ScriptLocation | find_scripts "$*"

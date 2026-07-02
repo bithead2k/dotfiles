@@ -1,0 +1,52 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  tcr
+# 
+#         USAGE:  ./tcr 
+# 
+#   DESCRIPTION:  Thompson Chain Reference
+#           Download the web pages from 
+#           https://www.studylight.org/concordances/eng/tcr/a.html - z.html
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  03/11/2026 12:22:07 PM CDT
+#      REVISION:  ---
+#===============================================================================
+set -x
+
+function get_chain_html() {
+	for letter in {a..z}
+	do 
+	    # Find out how many pages of references are in letter
+	    wget https://www.studylight.org/concordances/eng/tcr/${letter}.html -O ${letter}-01.html
+	    pages=$(cat ${letter}-01.html | grep pagination | tail -n 1 | sed 's/.*pn=//' | sed 's/&.*$//')
+	    cat ${letter}-01.html | grep "<a href=\"/concordances/eng/tcr/${letter}/" > ${letter}-chains.lst
+        rm ${letter}-01.html
+	    for (( page=2;page<=$pages;page++))
+	    do
+	        wget https://www.studylight.org/concordances/eng/tcr/${letter}.html?pn=${page} -O ${letter}-0${page}.html
+	        cat ${letter}-0${page}.html | grep "<a href=\"/concordances/eng/tcr/${letter}/" >> ${letter}-chains.lst
+	        rm ${letter}-0${page}.html
+	    done
+	done
+}
+
+function get_chain_references{
+    prefix="https://www.studylight.org"
+    for letter in {a..z}
+    do
+        chain=$(cat ${letter}-chains.lst | 
+    done
+}
+
+# get_chain_html
+
+get_chain_references
+
+

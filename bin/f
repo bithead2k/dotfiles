@@ -1,0 +1,27 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: f
+# 
+#         USAGE: ./f partial_course_name
+# 
+#   DESCRIPTION: Find the course name and number for a partial string
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 01/20/2020 09:01
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+#!/opt/local/bin/bash
+find . | # Find all files from this directory downwards
+    grep ".*-1s\.pdf$" | # Only need the pdf of the primary slides
+    sed -e 's/-1s\.pdf$//' -e 's_^.*/__' | # Strip the extension and the file path
+    grep -i "$1"  # Case insensitive search
+

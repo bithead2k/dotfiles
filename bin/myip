@@ -1,0 +1,23 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  myip
+# 
+#         USAGE:  ./myip 
+# 
+#   DESCRIPTION:  show all of the ips related to this host
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  08/29/2022 03:00:05 PM CDT
+#      REVISION:  ---
+#===============================================================================
+
+# hostname -I ?
+ifconfig | grep "inet[^6]" | sed -e 's/^.*inet //' -e 's/ .*$//' | grep -v '127.0.0.1'
+

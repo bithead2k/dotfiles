@@ -1,0 +1,19 @@
+#!/bin/bash
+for img in *.JPG
+do
+	orient=$(exiftool -CameraOrientation $img | sed 's/.* : //')
+	case $orient in
+		'Rotate 90 CW') echo "rotate 90 $img"
+			mogrify -rotate "90" "$img"
+			exiftool -overwrite_original_in_place -CameraOrientation="Horizontal (normal)" "$img"
+			;;
+		'Horizontal (normal)') echo "$img: " "nothing";;
+		'Rotate 270 CW') echo "rotate -90 $img"
+			mogrify -rotate "-90" "$img"
+			exiftool -overwrite_original_in_place -CameraOrientation="Horizontal (normal)" "$img"
+			;;
+		*)
+	esac
+	
+
+done

@@ -1,0 +1,29 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: lower
+# 
+#         USAGE: ./lower 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: moreutils
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 10/09/2019 12:58
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+#set -x
+
+input="$@"
+tr '[:upper:]' '[:lower:]' < <(echo -e "$input") | tr -d '\n'
+
+# cheat to peek at stdin
+stdin=0
+input=$(test -s /dev/stdin && cat -)
+[[ $? -eq 0 ]] && tr '[:upper:]' '[:lower:]' < <(echo -e "$input") | tr -d '\n'

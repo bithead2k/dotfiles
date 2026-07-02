@@ -1,0 +1,6 @@
+#!/bin/bash
+src=IMG_$(printf '%04i' ${1}).JPG
+dst=IMG_$(printf '%04i' ${2}).JPG
+mv "$src" swap.jpg
+mv "$dst" $src
+mv swap.jpg "$dst"

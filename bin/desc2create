@@ -1,0 +1,28 @@
+#!/opt/local/bin/bash
+#
+#===============================================================================
+#
+#          FILE: desc2create
+# 
+#         USAGE: ./desc2create 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 05/21/2019 11:01
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+pbpaste | sed -e '/=#.*\\d/d' | sed -e 's/.*Table.*"\(.*\)"/CREATE TABLE \1 AS ( /g' | 
+sed -e '/^[[:space:]]*$/d' | sed -e '/Column.*Type.*Collation.*Nullable.*Default.*Storage.*Stats target.*Description/d' | 
+sed -e '/^[-+]*$/d' | sed -e 's/|//' -e 's/|//' -e 's/|//' | sed -e 's/|/§/' -e 's/|.*//' -e 's/§/|/' | sed -e 's/|.*//' -e '2,$s/$/,/' 
+
+
+

@@ -1,0 +1,194 @@
+#!/bin/bash
+
+logging=0
+hostname=
+hostport=5410
+username=$(whoami)
+database="$username"
+config_file=
+outfile="" # stdout
+source_table_list=()
+
+ScriptVersion="1.0"
+
+function die() {
+    retval=$1
+    shift
+    echo -e "$*"
+    exit $retval
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	echo -e "
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -c|config   file    Provide a file with a list of table names
+  -d|database name    PostgreSQL DB (Default: $username)
+  -h|host     name    Name of server to search (Default: unix socket)
+  -o|output   file    Send the dump to a file. (Default: stdout)
+  -p|port     num     (Default: $hostport)
+  -t|table    name    Name of table to dump.  Can be repeated.
+  -u|user     name    Name of PostgreSQL user.
+  -v|version          Display script version
+
+You must provide either a config file with a list of tables,
+  or at least one -t switch
+Output will \e[31mclobber -o file\e[0m
+
+	"
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+if [ $# -eq 0 ]; then
+    usage
+    # exit 2
+fi
+
+while getopts ":c:d:h:lo:p:t:uv" opt
+do
+  case $opt in
+
+    c|config   ) source_table_list+=($(< "$OPTARG"));;
+
+    d|database ) database="$OPTARG";;
+
+    h|host     ) hostname="$OPTARG";;
+
+    l|log      ) (( logging++ ));;
+
+    o|output   ) outfile="${OPTARG}"; [[ -f "${outfile}" ]] && rm "${outfile}";;
+
+    p|port     ) hostport="${OPTARG}";;
+
+    t|table    ) source_table_list+=("$OPTARG");;
+
+    u|user     )  username="$OPTARG";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+if [ $logging -gt 2 ]; then
+    set -x
+fi
+
+if [ ${#source_table_list[@]} -eq 0 ]; then
+    die 1 "No tables provided to dump"
+    sleep 1
+fi
+
+if [ ! -z "$hostname" ]; then
+    # leave out the switch if it is unix socket
+    hostname="-h $hostname"
+fi
+
+connection="$hostname -d $database -U $username -p $hostport"
+
+# quick connection test
+psql15 $connection -qtAc '\q' || die 4 "Could not connect to $connection"
+
+dump_cmd="pg_dump15 $connection --schema-only"
+
+[[ $logging -gt 0 ]] && echo -e "Dump command:\n$dump_cmd"
+
+db_table_list=()
+db_table_list=($($dump_cmd | cat -n | grep 'CREATE TABLE' | sed -e 's/\tCREATE TABLE / /' -e 's/(//' -e 's/ /,/g' -e 's/^,*//g' -e 's/,$//g'))
+
+joined=
+for item in ${db_table_list[@]}
+do
+    joined="$joined\n$item"
+done
+joined=$(echo -e "$joined" | sed '1d')
+unset IFS
+[[ $logging -gt 0 ]] && echo "Length of table list: ${#db_table_list[@]}"
+[[ $logging -gt 1 ]] && echo -e "List of Tables: \n${joined}"
+
+# Testing list.  Shows expected behavior for fail cases
+#source_table_list+=(public.cant_touch_this)  # non-existent table, not found
+#source_table_list+=(public.foo) # garbage table, but exists
+#source_table_list+=(tickets)  # didn't provide the schema, could be duplicate, should not be found
+#source_table_list+=(public.t) 
+#source_table_list+=(kroybal.hours_to_days_2010) # sub-partition without a parent
+#source_table_list+=(kroybal.is_columns) # something other than public
+#source_table_list+=(kroybal.test) # no dependencies
+#source_table_list+=(kroybal.jail)  # sensitive table
+
+# Make sure that the requested tables
+#  actually exist in the database
+for (( i=0;i<${#source_table_list[@]};i++ ))
+do
+    table_name="${source_table_list[${i}]}"
+    if [ "$(echo "$joined" | grep ",$table_name")," == "," ]; then
+        echo "$table_name Not found"
+        read -p "Do you want to continue? [y/N] " answer
+        case "$answer" in
+            [Yy]* ) echo "Continuing..."; 
+                # remove from the array
+                source_table_list=($(printf "%s\n" "${source_table_list[@]}" | grep -v "$table_name"));;
+            * ) die 3 "User aborted";;
+        esac
+    fi
+done
+
+final_list=()
+# Order the source_table_list in the dependency order
+for (( i=0;i<${#source_table_list[@]};i++ ))
+do
+    for (( j=0;j<${#db_table_list[@]};j++ ))
+    do
+        table_name=$(echo "${db_table_list[${j}]}" | cut -d, -f2)
+        [[ $logging -gt 1 ]] && echo "Inspecting ${source_table_list[${i}]} == ${table_name}"
+        if [ "${table_name}" == "${source_table_list[${i}]}" ]; then
+            [[ $logging -gt 0 ]] && echo "Match $table_name == ${source_table_list[${i}]}"
+            final_list+=(${db_table_list[${j}]})  # Add the element that has the index
+        fi
+    done
+done
+
+[[ $logging -gt 1 ]] && echo -e "Final List:\n${final_list[@]}"
+
+# Ok, tables either found or removed from list
+# Connection has been verified
+# Start the actual dump
+while [ ${#final_list[@]} -gt 0 ]
+do
+    lowest=999999999
+    # Find the lowest number in the array
+    for (( i=0;i<${#final_list[@]};i++ ))
+    do
+        id=$(echo "${final_list[${i}]}" | cut -d, -f1)
+        if [ $id -lt $lowest ]; then
+            [[ $logging -gt 1 ]] && echo "Comparing $id < $lowest"
+            lowest=${id}
+            lowest_idx=$i
+        fi
+    done
+    
+    table_name=$(echo "${final_list[$lowest_idx]}" | cut -d, -f2)
+    [[ $logging -gt 0 ]] && echo "Dumping $table_name"
+    [[ $logging -gt 0 ]] && echo pg_dump15 $connection -t $table_name ${outfile:+"-f"} $outfile
+    [[ -z $outfile ]] && {
+        pg_dump15 $connection -t $table_name
+    } || {
+        pg_dump15 $connection -t $table_name >> "${outfile}"
+    }
+        
+    final_list=("${final_list[@]:0:$lowest_idx}" "${final_list[@]:$((lowest_idx + 1))}")
+
+done

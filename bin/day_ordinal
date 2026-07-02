@@ -1,0 +1,109 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  day_ordinal
+# 
+#         USAGE:  ./day_ordinal 
+# 
+#   DESCRIPTION:  get the camel case ordinal for a day
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/02/2023 06:58:26 AM CST
+#      REVISION:  ---
+#===============================================================================
+
+function die() {
+    retval=$1
+    shift
+    echo -e -e "$@"
+    exit $retval
+}
+
+[[ $# -ne 1 ]] && die 1 'Only parameter is a number from 1-31'
+
+[[ $1 -lt 1 ]] && die 2 'Day must be greater than 0'
+
+[[ $1 -gt 31 ]] && die 3 'Day must be less than 32'
+
+function ordinal_camel_cased() {
+case $1 in
+    1) echo -e "First";;
+    2) echo -e "Second";;
+    3) echo -e "Third";;
+    4) echo -e "Fourth";;
+    5) echo -e "Fifth";;
+    6) echo -e "Sixth";;
+    7) echo -e "Seventh";;
+    8) echo -e "Eighth";;
+    9) echo -e "Ninth";;
+    10) echo -e "Tenth";;
+    11) echo -e "Eleventh";;
+    12) echo -e "Twelfth";;
+    13) echo -e "Thirteenth";;
+    14) echo -e "Fourteenth";;
+    15) echo -e "Fifteenth";;
+    16) echo -e "Sixteenth";;
+    17) echo -e "Seventeenth";;
+    18) echo -e "Eighteenth";;
+    19) echo -e "Nineteenth";;
+    20) echo -e "Twentieth";;
+    21) echo -e "Twenty-first";;
+    22) echo -e "Twenty-second";;
+    23) echo -e "Twenty-third";;
+    24) echo -e "Twenty-fourth";;
+    25) echo -e "Twenty-fifth";;
+    26) echo -e "Twenty-sixth";;
+    27) echo -e "Twenty-seventh";;
+    28) echo -e "Twenty-eighth";;
+    29) echo -e "Twenty-ninth";;
+    30) echo -e "Thirtieth";;
+    31) echo -e "Thirty-first";;
+    *) die 4 'No idea'
+esac
+}
+
+function ordinal_abbreviated() {
+case $1 in
+    1) echo -e "1st";;
+    2) echo -e "2nd";;
+    3) echo -e "3rd";;
+    4) echo -e "4th";;
+    5) echo -e "5th";;
+    6) echo -e "6th";;
+    7) echo -e "7th";;
+    8) echo -e "8th";;
+    9) echo -e "9th";;
+    10) echo -e "10th";;
+    11) echo -e "11th";;
+    12) echo -e "12th";;
+    13) echo -e "13th";;
+    14) echo -e "14th";;
+    15) echo -e "15th";;
+    16) echo -e "16th";;
+    17) echo -e "17th";;
+    18) echo -e "18th";;
+    19) echo -e "19th";;
+    20) echo -e "20th";;
+    21) echo -e "21st";;
+    22) echo -e "22nd";;
+    23) echo -e "23rd";;
+    24) echo -e "24th";;
+    25) echo -e "25th";;
+    26) echo -e "26th";;
+    27) echo -e "27th";;
+    28) echo -e "28th";;
+    29) echo -e "29th";;
+    30) echo -e "30th";;
+    31) echo -e "31st";;
+    *) die 4 'No idea'
+esac
+}
+
+ordinal_camel_cased $1
+

@@ -1,0 +1,90 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: pgsync_whitelist_diff
+# 
+#         USAGE: ./pgsync_whitelist_diff 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 08/16/2016 10:37
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+
+
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] -f {filename} -t {filename} [--] 
+
+  Options:
+  -f|from file  File to compare
+  -t|to   file  File to compare
+  -h|help       Display this message
+  -v|version    Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+fromfile=
+tofile=
+
+while getopts ":hf:t:v" opt
+do
+  case $opt in
+
+    h|help     )  usage; exit 0   ;;
+
+    f|from     )  fromfile="$OPTARG";;
+
+    t|to       )  tofile="$OPTARG";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+[[ $fromfile == "" ]] && {
+    usage
+    exit 1
+}
+
+[[ $tofile == "" ]] && {
+    usage
+    exit 1
+}
+ 
+[[ -f $fromfile ]] || {
+    echo "File not found: $fromfile"
+    exit 1
+}
+
+[[ -f $tofile ]] || {
+    echo "File not found: $tofile"
+    exit 1
+}
+
+diff -u <(sed -e '/slave_WhiteListOfTableNames/s/,/\nslave_WhiteListOfTableNames=/g' -e '/slave_BlackListOfTableNames/s/,/\nslave_BlackListOfTableNames=/g' "$fromfile" | sort) <(sed -e '/slave_WhiteListOfTableNames/s/,/\nslave_WhiteListOfTableNames=/g' -e '/slave_BlackListOfTableNames/s/,/\nslave_BlackListOfTableNames=/g' "$tofile" | sort)

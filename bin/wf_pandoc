@@ -1,0 +1,67 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: wf_pandoc
+# 
+#         USAGE: ./wf_pandoc 
+# 
+#   DESCRIPTION: Kick off pandoc with a template file for WebFinish
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@gmail.com
+#  ORGANIZATION: 
+#       CREATED: 01/29/2019 12:04
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+set -x
+set -eu
+set -o pipefail
+
+usage () {
+    cat <<EOF
+Syntax:
+
+	${0//*\//} SOURCEFILE [OPTIONS]
+
+Options are passed unchanged to Pandoc, as in the following example:
+
+	${0//*\//} FILE.md --template=fr
+
+See Pandoc's documentation for information on all available options.
+
+EOF
+}
+
+if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+fi
+
+Source="$1"
+Target="${Source%.md}.pdf"
+shift 1
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  # if $SOURCE was a relative symlink, 
+    # we need to resolve it relative to the path where the symlink file was located
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" 
+done
+DataDir="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+
+#DataDir=$(cd "$(dirname "$(readlink "$0")")" && pwd)
+
+TemplateFile=$DataDir/templates/default.latex
+
+pandoc -s \
+    --data-dir=$DataDir \
+    --metadata=datadir:$DataDir \
+    -o "$Target" $@ \
+    -"$Source" $DataDir/templates/default.yaml

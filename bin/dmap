@@ -1,0 +1,4 @@
+#!/bin/bash
+#docker run -d -it -p 5433:5432 -p 9090:8080 -p 7002:5002 -e UI_PORT=9090 -e SERVICE_PORT=7002  -e DB_PORT=5433 --name=dmap_db_prod_enterprise_master ngdmapo/dmap_db_prod:v2026.02.0.1
+docker start 83d1fcb457ef
+docker ps -a

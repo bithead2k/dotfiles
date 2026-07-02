@@ -1,0 +1,126 @@
+#!/bin/bash
+
+
+ScriptVersion="1.0" # 2025-06-12T08:47:46 CST
+schemata='public'
+username=$USER
+database=$username
+hostname=
+hostport=5432
+rolename=$username
+writable=0
+existing=0
+logging=0
+
+function apply(){
+    psql "$hostname" -U $username -d "$database" -p "$hostport" -qtA 
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -d|database name      Set the name of the database  (default: $database)
+  -h|hostname name      Set the host connection    (default: unix socket)
+  -l|log                Cumulative logging flag (e.g. -lll)
+  -p|port     number    PostgreSQL host port (default: $hostport)
+  -r|role     name      Set the role to apply permissions (default: $username)
+  -s|schema   name      Set the name of the schema (default: $schemata)
+  -u|user     name      Set the username (default: $username)
+  -v|version            Display script version
+  -w|writable           Default read-only for existing objects.
+  -x|existing           Flag to apply permissions to current objects (default: no)
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+if [ $# -eq 0 ]; then
+    usage
+    exit
+fi
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":d:h:lp:r:s:u:vwx" opt
+do
+  case $opt in
+    
+    d|database ) database="$OPTARG";;
+
+    h|hostname ) hostname="$OPTARG";;
+
+    l|log      ) (( logging++ ));;
+
+    p|port     ) hostport="$OPTARG";;
+
+    r|role     ) rolename="$OPTARG";;
+
+    s|schema   ) schemata="$OPTARG";;
+    # h|help     )  usage; exit 0   ;;
+
+    u|user     ) username="$OPTARG";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    w|write    ) (( writable++ )) ;;
+
+    x|existing ) (( existing++ ));;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+if [ $logging -gt 2 ]; then
+    set -x
+fi
+if [ ! -z "$hostname" ]; then
+    hostname="-h '${hostname}'"
+fi
+
+# Create the permission statements
+default_sql="ALTER DEFAULT PRIVILEGES IN SCHEMA \"${schemata}\" 
+GRANT SELECT ON TABLES TO \"${rolename}\";"
+
+[[ "$logging" -gt 0 ]] && echo "$default_sql" 
+
+echo "$default_sql" | apply
+
+if [ $existing -eq 0 ]; then
+    exit
+fi
+
+# Apply the role to all of the existing objects
+permissions="SELECT"
+if [ "$writable" -gt 0 ]; then
+    permissions="${permissions},UPDATE,DELETE,INSERT"
+fi
+
+dumpline=""$hostname" -U $username -d "$database" -p "$hostport" --schema-only -n "${schemata}""
+[[ $logging -gt 0 ]] && echo "pg_dump $dumpline"
+
+# Get a list of tables
+table_list=$(pg_dump $dumpline | grep -i "CREATE TABLE ")
+[[ $logging -gt 1 ]] && echo -e "$table_list"
+table_list=$(echo -e "${table_list}" |   sed -e 's/CREATE TABLE //' -e 's/ .*$//')
+[[ $logging -gt 0 ]] && echo -e "$table_list"
+table_list=($table_list) # make it an array
+[[ $logging -gt 1 ]] && echo -e "$table_list"
+
+
+for table_name in ${table_list[@]}
+do
+    sql="GRANT ${permissions} ON ${table_name} TO ${rolename};"
+    [[ $logging -gt 0 ]] && echo "Applying: $sql"
+    echo "$sql" | apply
+done

@@ -1,0 +1,66 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  moody_today
+# 
+#         USAGE:  ./moody_today 
+# 
+#   DESCRIPTION:  Get the reading for the current day
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/09/2023 11:47:08 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+thedate=$1
+[[ "$#" -eq 0 ]] && thedate=$(date +"%F")
+
+function cleanup() {
+    sed -e 's_</p>_</p>\n_g'  | sed -e "s/<.*versehover'>//" -e 's_</span>__' -e '/<\/div>/d' -e 's_</a></p>__g'
+}
+
+get_reference() {
+    psql -qtAc "WITH chapters AS (SELECT long_name, 
+    generate_series(regexp_replace(chapter_range,'-.*$','','g')::int, regexp_replace(chapter_range,'^.*-','','g')::int) chapter 
+    FROM bible_reading_3year b3 
+    INNER JOIN bible_books bb 
+        ON b3.book_reference = bb.moody_name 
+        WHERE read_date='$thedate'::date)
+    SELECT 'https://kingjamesbibleonline.org/' || 
+        regexp_replace(long_name,' ','-','g') || 
+        '-Chapter-' || chapter || '/' AS reference
+    FROM  chapters;"
+}
+
+function get_chapter() {
+
+    wget -qO- "$1"  | grep "verse detail"  | cleanup
+
+}
+
+function html2md(){
+
+    # replace <em></em> with **
+    # replace EOL with \
+    # then remove it on the last line
+
+    sed -e 's_</em>_\*\*_g' \
+        -e 's_<em>_**_g' \
+        -e 's/$/ \\/' \
+        -e '$s_\\$__'
+}
+
+IFS=$'\n'
+for chapter in $(get_reference)
+do
+    echo -n  "**"
+    echo -n "$chapter" | sed -e 's_.*org/__' -e 's_/__' -e 's/-/ /g' 
+    echo '** \'
+    get_chapter ${chapter} | html2md
+done

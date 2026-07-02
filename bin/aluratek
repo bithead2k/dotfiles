@@ -1,0 +1,85 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  aluratek
+# 
+#         USAGE:  ./aluratek 
+# 
+#   DESCRIPTION:  Various camera commands
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  02/17/2023 07:46:26 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+ScriptVersion="1.0"
+verbosity=0
+camera=/dev/video1
+
+function list_ctrls(){
+    v4l2-ctl -d $camera --list-ctrls | sed -e 's/ 0x.*:/:/'
+}
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -c|camera [device]  (e.g. /dev/video1)
+  -d|debug            Cumulative debug flag (e.g. -ddd)
+  -h|help             Display this message
+  -l|list             List available controls
+  -L|List             Show available cameras
+  -v|version          Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":c:dhiLlov" opt
+do
+  case $opt in
+
+    c|camera   )  camera="$OPTARG";;
+
+    d|debug    )  (( verbosity++)); [[ $verbosity -ge 2 ]] && set -x;;
+
+    h|help     )  usage; exit 0   ;;
+
+    i|in       )  
+        current_zoom=$(v4l2-ctl -d $camera -C "zoom_absolute" | sed -e 's/^[^[:digit:]]*//')
+        (( current_zoom+=1 ))
+        v4l2-ctl -d $camera -c "zoom_absolute=$current_zoom";;
+
+    l|list     )  list_ctrls;;
+
+    L|List     )  v4l2-ctl  --list-devices 2>/dev/null | 
+        grep -A1 Aluratek | sed -e 's/[[:space:]]*//g';;
+
+    o|out      )
+        current_zoom=$(v4l2-ctl -d $camera -C "zoom_absolute" | sed -e 's/^[^[:digit:]]*//')
+        (( current_zoom-=1 ))
+        v4l2-ctl -d $camera -c "zoom_absolute=$current_zoom";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))

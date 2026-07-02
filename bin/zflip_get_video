@@ -1,0 +1,30 @@
+#!/bin/bash
+
+# Quick script to get the video off of the ZFlip3 Galaxy camera that is mounted to
+# the portable tripod. 
+# Takes no parameters, no overrides.
+# TODO:  put in command line parameters to override all the defauls here
+
+function die(){
+  retval=$1
+  shift
+  echo -e "$@"
+  exit $retval
+}
+
+# Path to photos on this specific camera
+export dcim_path=/storage/self/primary/DCIM/Camera
+export today=$(date +'%F')
+export studio_path=~/Pictures/portable_studio/${today}
+export video_list=$(adb shell ls $dcim_path/*.mp4 2>&1 | sed -e 's/[^[:print:]]*//g')
+[[ $video_list == "ls: ${dcim_path}/*.mp4: No such file or directory" ]] && die 1 'Nothing to transfer'
+
+mkdir -p $studio_path && cd $studio_path || die 2 "Could not make directory $studio_path"
+for video in ${video_list[@]} 
+do
+    #echo $video
+    adb pull $video .
+    adb shell rm $video
+done
+
+echo "Videos are now located in ${studio_path} and deleted from camera."

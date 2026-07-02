@@ -1,0 +1,40 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: service
+# 
+#         USAGE: ./service 
+# 
+#   DESCRIPTION: wrapper because i can't remember the damn syntax of the port command
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 08/06/2019 14:19
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+case $2 in
+start | load)
+    sudo port load $1
+    ;;
+stop | unload)
+    sudo port unload $1
+    ;;
+restart | reboot)
+    sudo port unload $1
+    sleep 5
+    sudo port load $1
+    ;;
+reload)
+    sudo port reload $1
+    ;;
+*)
+    echo "WTF"
+    ;;
+esac

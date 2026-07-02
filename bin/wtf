@@ -1,0 +1,30 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  wtf
+# 
+#         USAGE:  ./wtf 
+# 
+#   DESCRIPTION:  Make the characters on the command line (or stdin) distinctive
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  08/25/2023 12:21:47 PM CDT
+#      REVISION:  ---
+#===============================================================================
+sounds=(
+    [0]="Ah"
+)
+tail="$@"
+for ((i=0;i<${#tail};i++))
+do
+    char="${tail:${i}:1}"
+    ascii=$(printf %d \'$char)
+    echo -en "$ascii "
+done
+echo ""

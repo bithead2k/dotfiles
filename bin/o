@@ -1,0 +1,223 @@
+#!/bin/bash
+# Add a note to Obsidian on today's note in section made for this.
+today=$(date +'%Y_%m_%d')
+prefix=~/Documents/notes/
+notefile=${prefix}journals/${today}.md
+tasks=${prefix}snippets/tasks.md
+section_name="Interstitial"
+rightarrow="⟶"
+mdash="—"
+doubledash="--"
+question="?"
+separator=${doubledash}
+li="*"
+dojournal=
+ScriptVersion="1.0"
+task=0
+logging=0
+goal="Daily goals"
+file_lines=$(cat "${notefile}" | wc -l)
+# find the highest horizontal line
+divider=$(cat "${notefile}" | 
+    grep -n "<hr style='border-width: 6px; border-color:white'/>" | 
+    tail -n 1 | sed -e 's/:.*$//')
+# Look for the header within 4 lines of the divider
+(( div_plus4=divider+4 ))
+section_start=$(awk "/${section_name}/ && NR >= $divider && NR <= $div_plus4 { print NR }" "${notefile}")
+
+function gojournal(){
+    lineno=${1}
+    gvim +${lineno} +'normal $A   ' +startinsert "${notefile}"
+}
+
+function last_line(){
+
+	for ((i=${section_start};i<=${file_lines};i++ ))
+	do
+	    comment=$(cat "${notefile}" | head -n $i | tail -n 1 | grep '^[[:space:]]*[\*-]')
+	    [[ "$comment" == "" ]] && break
+	done
+	
+	(( i-- ))
+	
+	return ${i}
+	echo "${i}"
+
+}
+
+function get_task(){
+
+    sed -n "$1p" "${tasks}"
+
+}
+
+function list_tasks(){
+    cat "${notefile}" | column
+}
+
+function add_daily_goal(){
+
+    goal_section=$(cat -n $notefile | grep "${goal}:" | sed -e 's/^[[:space:]]*//' -e 's/\t.*$//')
+    (( goal_section++ ))
+    (( goal_section++ ))
+    # start looking for open lines
+    open_line=
+    iterate=0
+    found=0
+    while [ $iterate -le 20 ]
+    do
+        (( indexof=goal_section+iterate ))
+        testbunny=$(cat $notefile | head -n $indexof | tail -n 1 | sed -e  's/\t.*$//' -e 's/[^[:print:]]*//g' )
+        [[ "$testbunny" == "---" ]] && break
+        [[ "$testbunny" == "" ]] && break
+        echo -e "$testbunny" | grep '\- \[ \] $' >/dev/null && {
+            sed -i "${indexof}s/$/${*}/" "$notefile"
+            exit
+        }
+        (( iterate++ ))
+    done
+# If we got here, there wasn't an available line
+(( iterate-- ))
+(( indexof=goal_section+iterate ))
+sed -i "${indexof}a\ - [ ] ${*}" "$notefile"
+exit
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options:
+  -a            Long right arrow 
+  -c            Checkbox
+  -d|debug      
+  -g|goal  text Add goal for the day
+  -h|help       Display this message
+  -j|journal    Open today's interstitial journal
+  -l|logging    Cumulative logging (e.g. -lll)
+  -m            mDash
+  -s|stretch text Add stretch goal for the day
+  -t  number    Add a task by the number
+  -T  text      Add a task to the task list
+  -q            Question
+  -v|version    Display script version
+
+For a list of tasks, just invoke ${0##/*/} with no parameters
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":acdg:hjlmqs:t:T:v" opt
+do
+  case $opt in
+
+    a          ) separator=${rightarrow};;
+
+    c          ) li=" - [ ]";;
+
+    d|debug    ) set -x;;
+
+    g|goal     )  shift; add_daily_goal "$*"; exit;;
+
+    h|help     )  usage; exit 0   ;;
+
+    j|journal  )  dojournal=true;;
+
+    l|logging  ) (( logging++ )); [[ $logging -gt 2 ]] && set -x;;
+   
+    m          )  separator=${mdash};;
+
+    s|stretch  )  shift; goal="Stretch goals"; add_daily_goal "$*"; exit;;
+
+    t          )  task="${OPTARG}";;
+
+    T          )  shift; echo -n "${*}" >> "${tasks}"; cat "${tasks}" | sort | uniq > "${tasks}.tmp"; mv "${tasks}.tmp" "${tasks}"; exit;;
+
+    q          )  separator=${question};;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+#  if all we got was 'o -j', just open today's journal
+[[ "$*" == "" ]] && [[ "$dojournal" ]] && {
+    [[ $logging -gt 0 ]] && echo "Opening today's journal: ${notefile}"
+    gojournal ${file_lines} && exit
+}
+
+[[ "$*" == "" ]] || [[ "${dojournal}" ]] && [[ ${task} -eq 0 ]] && cat -n "${tasks}" | column -t --separator $'\n' && exit
+
+# Fix some shell quoting issues
+[[ ! "$*" == "" ]] && quoted=${*//\'/\\\'} || quoted=$(get_task ${task} )
+quoted=${quoted//\"/\\\"}
+quoted=" $li ==$(date +"%H:%M:%S")== ${separator}  ${quoted}"
+[[ $logging -gt 1 ]] && echo "$quoted"
+
+# If today's journal doesn't exist, make it
+# (should never run.  Journals are pre-made to 2026
+[[ -f "${notefile}" ]] || newjournal -d $(today)
+
+# Add a section if it doesn't exist.
+[[ "${section_start}" == "" ]] && {
+    [[ $logging -gt 1 ]] && echo "Creating ${section_name} section"
+    # There is no section.  Just make it happen
+    # Also, add another horizontal bar below the section
+    # (that isn't exactly the same, so we don't stomp ourselves)
+    # (notice it's 5px :)
+    sed -ie "${divider}a\\
+\\
+# ${section_name}\\
+\\
+${quoted}\\
+\\
+<hr style='border-width: 5px; border-color:white'/>\\
+ " "${notefile}"
+
+    [[ "$dojournal" ]] && dojournal ${div_plus4}
+    exit
+
+}
+
+
+# skip the section header and the next blank line
+(( section_start++ ))
+(( section_start++ ))
+# run to the end of the file, 
+# but we probably won't need 
+# anywhere near that much buffer
+last_line
+insertion=$?
+[[ $logging -gt 0 ]] && echo "Insertion point: $insertion"
+# Starting at the last line that was a list item, 
+# insert the new comment
+# Get the start time of the previous item
+stime=$(head -n ${insertion} "${notefile}" | tail -n 1 | sed -e 's/^\(.*\)==.*$/\1/' -e 's/^.*==//')
+start_sec=$(date --date "$stime" +%s)
+end_sec=$(date +%s)
+diff_minutes=$(( (end_sec - start_sec) / 60 ))
+[[ $logging -gt 0 ]] && echo "$diff_minutes minutes"
+[[ $diff_minutes -eq 1 ]] && plural="" || plural="s"
+[[ ! -z "${insertion}" ]] && sed -ie "${insertion}s/$/ | $diff_minutes minute${plural}/" "${notefile}"
+
+# Append the bullet item to the end of the section
+[[ ! -z "${insertion}" ]] && sed -ie "${insertion}a\\
+${quoted}" "${notefile}"
+[[ $logging -gt 1 ]] && echo "sed returned $?"
+(( insertion++ ))
+[[ "$dojournal" ]] && gojournal ${insertion}
+exit 0

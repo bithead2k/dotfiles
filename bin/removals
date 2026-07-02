@@ -1,0 +1,22 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: removals
+# 
+#         USAGE: ./removals 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 11/02/2017 13:52
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+grep -v '^GRANT$' | grep -v '^ALTER SCHEMA$' | grep -v '^CREATE SCHEMA$' | grep -v 'ALTER FUNCTION' | grep -v '^SET$' | grep -v '^CREATE FUNCTION$' | grep -v '^ALTER TABLE$' | grep -v '^CREATE VIEW$' | grep -v '^ALTER SEQUENCE$' | grep -v '^CREATE TABLE$' | grep -v '^CREATE SEQUENCE$' | grep -v '^REVOKE$' | grep -v 'ALTER DEFAULT PRIVILEGES' | grep -v '^CREATE TRIGGER$' | grep -v '^COMMENT$' | grep -v '^CREATE RULE$' | grep -v '^CREATE INDEX$' | grep -v '^CREATE TYPE$' | grep -v '^ALTER TYPE$' | grep -v '^CREATE EXTENSION$' | grep -v '^ALTER DATABASE$' | grep -v '^CREATE OPERATOR FAMILY$' | grep -v '^ALTER OPERATOR FAMILY$' | grep -v '^CREATE OPERATOR CLASS$' | grep -v '^ALTER OPERATOR CLASS$' | grep -v '^CREATE AGGREGATE$' | grep -v '^ALTER AGGREGATE$' 

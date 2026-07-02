@@ -1,0 +1,109 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: psql2pg
+# 
+#         USAGE: ./psql2pg 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 01/19/2019 17:38
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] -t {table_name} [--] 
+
+  Options: 
+  -h|help          Display this message
+  -i|input [file]  Filename with data, default stdin
+  -t|table [name]  Name of insert table in PostgreSQL
+  -v|version       Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+function header2createtable() {
+
+    echo -en "CREATE TABLE IF NOT EXISTS $1 (\n $2 \t text\n);"  | sed 's/|/ text,\n /g'
+
+}
+
+function die() {
+    exit_code=${2:-1}
+    echo -en "${1:-}"
+    exit $exit_code
+}
+
+function crap_filter() {
+
+# reserved to modify rows with bizarre data if necessary
+cat -
+
+}
+
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+input="-"
+tablename=set_the_table_name_dumbass
+PGCONNECT_TIMEOUT=5
+psql="psql -qtAo ON_ERROR_STOP=1"
+
+while getopts ":hi:t:v" opt
+do
+  case $opt in
+
+    h|help     )  usage; exit 0   ;;
+
+    i|input    )  input=$OPTARG ;;
+
+    t|table    )  tablename=$OPTARG;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+
+[[ $tablename == "set_the_table_name_dumbass" ]] && {
+    usage
+    die
+}
+
+thedata=$(cat $input)
+
+#get the header names, and create a table with all text types
+sql=$(header2createtable "$tablename" "$(echo -e "$thedata" | head -n 1 )" )
+
+echo $sql | $psql
+[[ $? -ne 0 ]] && die "$sql\nCommand Failed"
+
+rowline=$(echo -e "$thedata" | grep -n "^([[:digit:]]*[[:space:]]row.)[[:space:]]*$" | head -n 1 | cut -d: -f 1)
+(( rowline-- ))
+thedata=$(echo -e "$thedata" | head -n $rowline | sed '1d' | sed '1d')
+
+echo -e "$thedata" | crap_filter | $psql -c "COPY $tablename FROM STDIN WITH CSV HEADER DELIMITER '|';"

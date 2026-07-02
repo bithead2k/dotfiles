@@ -1,0 +1,14 @@
+#!/opt/local/bin/bash
+
+set -x
+
+pandoc -f markdown -s -t beamer \
+	--template=../../Templates/2ndQuadrant \
+	--slide-level=2 \
+	--variable=theme:2ndQuadrantTraining \
+	-fmarkdown-implicit_figures \
+	-o cache/${1//md/tex} $1
+
+pdflatex -output-directory cache cache/${1//md/tex}
+
+

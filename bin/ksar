@@ -1,0 +1,2 @@
+#!/opt/local/bin/bash
+java -jar /Applications/ksar-5.2.4-SNAPSHOT-all.jar

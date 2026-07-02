@@ -1,0 +1,34 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  age
+# 
+#         USAGE:  ./age 
+# 
+#   DESCRIPTION:  Calculate an age from a date stamp
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  06/05/2023 10:47:33 AM CDT
+#      REVISION:  ---
+#===============================================================================
+
+now=$(date +"%F")
+datediff() {
+    d1=$(date -d "$1" +%s)
+    d2=$(date -d "$2" +%s)
+    echo $(( (d1 - d2) / 86400 ))
+}
+
+past=$(date --date="$*" +"%F")
+
+days=$(datediff $now $past)
+
+(( years = days / 365 ))
+
+echo $years

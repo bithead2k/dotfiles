@@ -1,0 +1,24 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  checkboxes
+# 
+#         USAGE:  ./checkboxes 
+# 
+#   DESCRIPTION:  Create a numbered row of checkboxes in markdown
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/13/2023 11:57:03 AM CST
+#      REVISION:  ---
+#===============================================================================
+
+for ((i=1;i<=$1;i++))
+do
+    echo " - [ ] $(printf '%02i' $i): "
+done

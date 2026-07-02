@@ -1,0 +1,24 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  lastjournal
+# 
+#         USAGE:  ./lastjournal 
+# 
+#   DESCRIPTION:  Get yesterday's date and open the journal
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/01/2023 04:52:23 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+yesterday=$(date --date='1 days ago' +"%F" | sed 's/-/_/g')
+journal="/home/kroybal/Documents/pandoc_notes/journal_$yesterday.md"
+echo "$journal"
+gvim "$journal"

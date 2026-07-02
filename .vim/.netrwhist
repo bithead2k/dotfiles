@@ -1,0 +1,9 @@
+let g:netrw_dirhistmax  =10
+let g:netrw_dirhistcnt =7
+let g:netrw_dirhist_7='/home/kroybal/work/att/templates'
+let g:netrw_dirhist_6='/home/kroybal/.Xojo'
+let g:netrw_dirhist_5='/home/kroybal/.vim/markdown-preview.nvim'
+let g:netrw_dirhist_4='/home/kroybal/.vim'
+let g:netrw_dirhist_3='/home/kroybal/work/sql'
+let g:netrw_dirhist_2='/home/kroybal/work/wf/hypercheck/pgsql'
+let g:netrw_dirhist_1='/home/kroybal/work/ts/hypercheck/pgsql'

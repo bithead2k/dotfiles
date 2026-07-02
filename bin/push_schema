@@ -1,0 +1,25 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: push_schema
+# 
+#         USAGE: ./push_schema 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 11/02/2016 11:10
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+scp ~/source/ta/schema/SCHEMA-$1.sql sync01bd:~/source/schema
+scp ~/source/ta/schema/SCHEMA-$1.sql sync01ad:~/source/schema
+scp ~/source/ta/schema/SCHEMA-$1.sql jump01a:~/source/schema
+scp ~/source/ta/schema/SCHEMA-$1.sql jump01b:~/source/schema

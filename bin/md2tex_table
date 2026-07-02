@@ -1,0 +1,114 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: md2tex_table
+# 
+#         USAGE: ./md2tex_table 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 09/27/2017 21:58
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+workfile="$1"
+
+function die() {
+	echo -n "$@"
+	exit 1
+}
+
+[[ -f "$1" ]] || die "Couldn't find file $1"
+
+
+
+function header (){
+
+colcount=${1//[^|]/}
+colcount=${#colcount}
+
+case $colcount in
+1)die "Unsupported single column table";;
+2)tabletype="TableI}{5cm}{83mm";;
+3)tabletype="TableII}{5cm}{5cm}{83mm";;
+4)tabletype="TableIII}{5cm}{5cm}{5cm}{83mm";;
+5)tabletype="TableIV}{5cm}{5cm}{5cm}{83mm";;
+*)die "Unsupported table type $colcount";;
+esac
+
+echo "
+\begin{$tabletype}{TODO:TABLE TITLE HERE}
+
+\bf "
+
+cols=$(echo "$1" | sed -e 's/^[[:space:]]*|//' -e 's/|[[:space:]]*$//' -e 's/\*//g')
+cols=$(echo "$cols" | tr '|' '\n')
+
+IFS=$'\n'
+for col in $cols
+do
+
+echo "&
+\bf\hfil
+$col"
+
+done
+
+echo '\\\hline\endhead
+'
+
+}
+
+
+function footer() {
+
+colcount=${1//[^|]/}
+colcount=${#colcount}
+
+case $colcount in
+1)die "Unsupported single column table";;
+2)tabletype="TableI";;
+3)tabletype="TableII";;
+4)tabletype="TableIII";;
+5)tabletype="TableIV";;
+*)die "Unsupported table type $1";;
+esac
+
+echo "\end{$tabletype}"
+
+}
+
+headline=$(head -n 1 "$1")
+
+header "$headline"
+
+footertext=$(footer "$headline")
+
+linecount=$(cat "$1" | wc -l)  #<-- not a UUOC.  It strips the file name
+counter=0
+IFS=$'\n'
+for line in $(<"$1")
+do
+	(( counter++ ))
+	[[ counter -eq 1 ]] && continue
+	[[ counter -eq 2 ]] && continue
+	line=$(echo "$line" | sed -e 's/`//g' -e 's/_/\\_/g' -e 's/%/\\%/g' -e 's/^[[:space:]]*|//' -e 's/|[[:space:]]*$//' | sed -e 's/|/\n\&\n/g' )
+	echo -e "&
+ $line"
+	echo ""
+	[[ $counter -eq $linecount ]] || echo -n "\\\\"
+    #echo -n "\\\\"
+	echo -e "\n"
+	
+done
+
+echo $footertext
+echo -e "\n"

@@ -1,0 +1,125 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  get_livescribe
+# 
+#         USAGE:  ./get_livescribe 
+# 
+#   DESCRIPTION:  Rotate through the files created by LiveScribe+
+#       Download them and convert to markdown for Obsidian
+# Id                                  Name                               Type      Size     Created
+# 1rvdRtmevwhxFI3jVWjncFjqSfoS90zE4   Page 3 - Printable Notepad 1.txt   regular   1.4 KB   2025-03-28 05:27:20
+# 16X9gfaJHoLUooAfWfNHt7NpaWJK43JlZ   Page 1 - Printable Notepad 1.txt   regular   1.3 KB   2025-03-28 05:27:13
+# 1cPyE7SJT-zE0NPFv1c8r71TaHOWQlndN   Page 2 - Printable Notepad 1.txt   regular   1.3 KB   2025-03-28 05:27:08
+# ...
+#
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  03/28/2025 05:36:45 AM CDT
+#      REVISION:  ---
+#===============================================================================
+# set -x
+
+# Where to put the resulting files in the Obsidian vault:
+livescribe_directory=~/Documents/notes/livescribe
+# Where to put the intermediate files, so we can compare them later:
+livescribe_archive=~/Downloads/livescribe/archive
+# UID of the top level directory on gdrive that contains the notebooks
+gdrive_uid='1ma08z4wMsh0Umxv-MaBTjsG3N5-6EYPp'
+# Poll the [Livescribe +]/auto-send/ directory
+livescribe_sources=()
+IFS=$'\n'
+# Top level directories in gdrive, one per notebook
+livescribe_sources=($(gdrive files list --parent $gdrive_uid 2>/tmp/gdrive.log | 
+    sed -e 's/ .*$//' -e '1d')) # Remove the head line and strip to the UIDs
+# Array will have (at least) these notebooks
+#livescribe_sources+=(1XeM7odUU9smTyxLCbxV1Pf_UCBMwNhhl) # Printable Notepad 1
+#livescribe_sources+=(18H2tbu23dog_QRp911htu8yi8X6a-naG) # A5 Starter Notebook 1
+
+# Well, kinda OCR.  The text comes from a livescribe LivePen.
+chatgpt_prompt='The following text was extracted using OCR and may contain errors such as:
+- Misrecognized characters (e.g., 1 instead of l, 0 instead of O)
+- Strange line breaks
+- Missing punctuation or random symbols
+                          
+Please clean it up for readability and correct obvious OCR mistakes. Do not change the meaning. Output only the corrected text.
+                                              
+--- BEGIN OCR TEXT ---'
+chatgpt_end='--- END OCR TEXT ---'
+
+# Do the work in a scratch directory
+
+pushd /tmp/ > /dev/null 2>&1
+
+# Blow away any text files already here
+[[ -f *.txt ]] && rm *.txt
+
+# Make sure that the archive directory exists and we can write to it.
+[[ -d $livescribe_archive ]] || mkdir -p $livescribe_archive
+
+IFS=$'\n'
+# for each UID in the notebook directory
+for lsource in ${livescribe_sources[@]}
+do
+    # For each file=(page) in the notebook
+	for txt in $(gdrive files list --parent $lsource 2>>/tmp/gdrive.log | sed '1d')
+	do
+	    # Split the UID FILENAME(with embedded notebook)
+        #  into {UID} {NOTEBOOK} {PAGE}
+	    # UID is everything up to the first space.
+	    uid=$(echo "${txt}" | sed 's/ .*$//')
+        # Filename is "Page 1 - Printable Notepad 1.txt"
+	    filename=$(echo "${txt}" | sed -e "s/^${uid}[[:space:]]*//" \
+	        -e 's/[[:space:]]*regular[[:space:]]*.*$//')
+        # Notebook is "Printable_Notepad_1"
+	    notebook=$(echo "${filename}" | sed -e 's/.*- //' -e 's/.txt//')
+        # Pagename is "Page 1"
+	    pagename=$(echo "${filename}" | sed -e "s/ - ${notebook}\.txt//")
+	    notebook=${notebook// /_}
+	    gdrive files download --overwrite "${uid}" 2>>/tmp/gdrive.log > /dev/null
+        echo -ne "$notebook : $pagename : $uid : "
+        [[ ! -s $filename ]] && {
+            # file is empty.  something went wrong with livescribe->gdrive
+            # delete it to force a re-sync
+            gdrive files delete "${uid}" 2>>/tmp/gdrive.log
+            # Also delete the local copy that is probably also empty
+            #  or at least out of date
+            [[ -f "$livescribe_archive/$filename" ]] && rm "$livescribe_archive/$filename"
+            echo "$filename is screwed up on gdrive.  Deleted.  Wait for next sync to retry." >&2
+            # Clean up tmp
+            [[ -f "${filename}" ]] && rm "${filename}"
+            continue
+        }
+	    diff  "$filename" "$livescribe_archive/$filename" >/dev/null 2>&1
+	    [[ ! $? -eq 0 ]] && {
+	        cp "$filename" "$livescribe_archive/$filename"
+            # cat "$livescribe_archive/$filename"
+	        # change the file contents and date
+	        touch "$livescribe_archive/$filename"
+	        [[ ! -d "$livescribe_directory/$notebook" ]] &&
+	            mkdir -p "$livescribe_directory/$notebook"
+            # wrap the file contents into a chatGPT prompt
+            gptprompt="$chatgpt_prompt\n$(cat "$livescribe_archive/$filename")\n$chatgpt_end"
+            # echo -e "$gptprompt"
+            echo "$gptprompt" | chatgpt | 
+                sed -e "s/--- BEGIN CORRECTED TEXT ---/# $notebook $pagename\n/" \
+                    -e "s/--- BEGIN CLEANED TEXT ---/# $notebook $pagename\n/" \
+                    -e '/--- END CORRECTED TEXT ---/d' \
+                    -e '/--- END CLEANED TEXT ---/d' > "$livescribe_directory/$notebook/${pagename}.md"
+            echo "Updated"
+        } || {
+            echo "Current"
+        }
+
+        # clean up the temp area
+        [[ -f "${filename}" ]] && rm "${filename}"
+    done
+done
+
+popd > /dev/null 2>&1
+

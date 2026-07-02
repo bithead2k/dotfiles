@@ -1,0 +1,27 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  aluratek_new_zoom
+# 
+#         USAGE:  ./aluratek_new_zoom
+# 
+#   DESCRIPTION:  Set the zoom controls on the new Aluratek video
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  03/24/2023 10:52:47 AM CDT
+#      REVISION:  ---
+#===============================================================================
+
+video_device=$(v4l2-ctl --list-devices 2>/dev/null | grep -A1 "Aluratek.*" | sed -e 's/[[:space:]]*//g' | tail -n1)
+current_zoom=$(v4l2-ctl -d $video_device -C "zoom_absolute" | sed -e 's/^[^[:digit:]]*//')
+
+[[ $1 == "i" ]] && (( current_zoom++ ))
+[[ $1 == "o" ]] && (( current_zoom-- ))
+        
+v4l2-ctl -d $video_device -c "zoom_absolute=$current_zoom"

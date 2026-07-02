@@ -1,0 +1,20 @@
+§ =============================================================
+§  Personal Information
+§ =============================================================
+
+SetMacro( 'AUTHOR',       'Kirk Roybal' )
+SetMacro( 'AUTHORREF',    '' )
+SetMacro( 'EMAIL',        'Kirk.Roybal@gmail.com' )
+SetMacro( 'ORGANIZATION', '' )
+SetMacro( 'COMPANY',      'WebFinish LLC' )
+SetMacro( 'COPYRIGHT',    'Copyright (c) |YEAR|, |AUTHOR|' )
+SetMacro( 'LICENSE',      'PostgreSQL License' )
+
+§ =============================================================
+§  Date and Time Format
+§ =============================================================
+
+§SetFormat( 'DATE', '%x' )
+§SetFormat( 'TIME', '%H:%M' )
+§SetFormat( 'YEAR', '%Y' )
+

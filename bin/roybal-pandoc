@@ -1,0 +1,125 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: roybal-pandoc
+# 
+#         USAGE: ./roybal-pandoc 
+# 
+#   DESCRIPTION: Invoke Pandoc with personal templates
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 09/23/2019 21:13
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] source.md [--] 
+
+  Options: 
+  -d|debug                  Display bash debugging
+  -f|filter   [name]        Pass filter to pandoc
+  -h|help                   Display this message
+  -l|listings [name]        Pass listing to pandoc
+  -t|template [filename]    YAML File template
+  -v|version                Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+function die() {
+    echo -e "$1"
+    exit 1
+}
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+opts=""
+#template_filename="WebFinishReport"
+template_filename="RoybalReport"
+markdown_file=""
+
+while getopts ":df:hl:t:v" opt
+do
+  case $opt in
+
+    d|debug    )  set -x;;
+
+    h|help     )  usage; exit 0   ;;
+
+    f|filter   )  opts="$opts $OPTARG";;
+
+    l|listings )  opts="$opts $OPTARG";;
+
+    t|template )  template_filename="$OPTARG";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+[[ -f "$1" ]] && markdown_file="$1" || {
+    usage
+    die "File not found: $1"
+}
+
+target="${markdown_file//.md/.pdf}"
+shift 1
+
+hash greadlink 2>/dev/null && my_readlink=greadlink || my_readlink=readlink
+readlink_result="$($my_readlink -f "$0")"
+data_dir=$(cd "$(dirname $readlink_result)" && pwd)
+
+if [[ "${template_filename////}" = "$template_filename" ]]; then
+    template_file=$data_dir/templates/$template_filename.latex
+    metadata_file=$data_dir/templates/$template_filename.yaml
+else
+    template_file=$template_filename
+    metadata_file=${template_filename%.latex}.yaml
+fi
+
+if [[ ! -f $template_file ]]; then
+    cat <<EOF
+ERROR: template files not found:
+
+	$template_file
+	$metadata_file
+
+Please check command line arguments.
+
+EOF
+    exit 2
+fi
+
+[[ -d graphviz-images ]] && rm -rf graphviz-images
+
+pandoc -s \
+       -F $data_dir/templates/graphviz.py \
+       --pdf-engine=xelatex \
+       --pdf-engine-opt=-8bit \
+       --template=$template_file \
+       --data-dir=$data_dir \
+       --metadata=datadir:$data_dir \
+       -o "$target" $opts \
+       "$markdown_file" $metadata_file

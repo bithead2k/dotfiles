@@ -1,0 +1,112 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE: cookie
+# 
+#         USAGE: ./cookie 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 08/26/2019 15:43
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+keyfield=
+psql='psql -p 5434'
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  This utility script will check a dictionary 
+  against a jumble of letters for english words
+  that are legal in the game of "Word Cookies"
+  on Android.
+
+  Usage :  ${0##/*/} [options] [--] -s acegottz
+
+  Options: 
+  -a|add       [word] Add word to dictionary
+  -b|backup           Make a data dump of the dictionary in pg_dump COPY format.
+  -c|count            Count of dictionary words in the game
+  -d|deprecate [word] Word is not legal in game
+  -f|full             VACUUM FULL dictionary
+  -h|help             Display this message
+  -p|permute   [word] Permutations of the letters of word 
+  -r|recluster        CLUSTER dictionary;
+  -s|scramble  [text] Characters to search in
+  -v|version          Display script version
+
+    Restore the dictionary:
+
+    gunzip -c 20190907_200316_dictionary.sql.gz | psql
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+function backup() {
+    $psql -qtAc "SELECT pg_get_functiondef(f.oid) || ';'
+FROM pg_catalog.pg_proc f
+INNER JOIN pg_catalog.pg_namespace n ON (f.pronamespace = n.oid)
+WHERE n.nspname <> 'pg_catalog';" | tr '\n' '~' | sed -e 's/~;~/;\n/g' | grep word_cookie | grep trigger | sed 's/~/\n/g'
+    pg_dump -c --no-owner -t dictionary
+}
+
+function die () 
+{
+
+    echo -e "$1\n\n"
+    usage
+    exit 1
+}
+
+[[ $# -eq 0 ]] && die "No parameters provided."
+
+while getopts ":a:bcd:fhp:rs:v" opt
+do
+  case $opt in
+
+    a|add      )  $psql -qtAc "SELECT word_cookie_add('$OPTARG');" | sed -e '/^[[:space:]]*$/d';;  # remove empty line output
+
+    b|backup   )  backup | gzip -9c > $(date +"%Y%m%d_%H%M%S")_dictionary.sql.gz ;;
+
+    c|count    )  $psql -qtAc "SELECT count(word_lower) FROM dictionary WHERE word_cookie;";;
+
+    d|deprecate)  $psql -qtAc "SELECT word_cookie_deprecate('$OPTARG');" | sed -e '/^[[:space:]]*$/d';;
+
+    f|full     )  $psql -qtAc "VACUUM FULL dictionary;" && psql -qtAc "ANALYZE dictionary;";;
+
+    h|help     )  usage; exit 0   ;;
+
+    p|permute  )  $psql -qtAc "SELECT word_cookie_array2rows('$OPTARG') ORDER BY 1;";;
+
+    r|recluster)  $psql -qtAc "CLUSTER dictionary;";;
+
+    s|scramble )  $psql -qtAc "SELECT word_cookies('$OPTARG');" | column;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+

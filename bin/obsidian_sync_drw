@@ -1,0 +1,7 @@
+#!/bin/bash
+pushd ~/Documents/notes >/dev/null 2>&1
+rsync -avz kroybal@atlld-kroybal1:~/Documents/notes/* .
+rsync -avz kroybal@atlld-kroybal1.local:~/Documents/notes/* .
+rsync -avz * kroybal@atlld-kroybal1:~/Documents/notes/
+rsync -avz * kroybal@atlld-kroybal1.local:~/Documents/notes/
+popd > /dev/null 2>&1

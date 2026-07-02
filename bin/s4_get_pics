@@ -1,0 +1,145 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  s4_get_pics
+# 
+#         USAGE:  ./s4_get_pics 
+# 
+#   DESCRIPTION:  
+# Quick script to get the video off of the S4 Galaxy camera that is mounted to
+# the portable tripod. 
+# 
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  07/24/2022 01:23:19 AM WEST
+#===============================================================================
+
+set -o nounset                                  # treat unset variables as errors
+
+#===============================================================================
+#   GLOBAL DECLARATIONS
+#===============================================================================
+declare -rx SCRIPT=${0##*/}                     # the name of this script
+declare -rx mkdir='/bin/mkdir'                  # the mkdir(1) command
+ScriptVersion="2.0"
+dcim_path=/storage/extSdCard/DCIM/Camera
+today=$(date +'%F')
+pic_extension=jpg
+
+#===============================================================================
+#   SANITY CHECKS
+#===============================================================================
+if [ -z "$BASH" ] ; then
+    printf "$SCRIPT:$LINENO: run this script with the BASH shell\n" >&2
+    exit 192
+fi
+
+if [ ! -x "$mkdir" ] ; then
+    printf "$SCRIPT:$LINENO: command '$mkdir' not available - aborting\n" >&2
+    exit 192
+fi
+
+#===============================================================================
+#   MAIN SCRIPT
+#===============================================================================
+
+
+#===  FUNCTION  ================================================================
+#          NAME:  die
+#   DESCRIPTION:  throw an error and exit
+#    PARAMETERS:  error code to throw, the rest is a message
+#       RETURNS:  exits the script
+#===============================================================================
+function die()
+{
+  # catch the exit code
+  retval=$1
+  shift
+  # output everything else to stderr
+  echo -e "$@" >&2
+  # abend
+  exit $retval
+}    # ----------  end of function die  ----------
+
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options:
+  -d|dir [name] Change the path to files on the camera (default: ${dcim_path})
+  -e|ext [name] Change the default filename extension (default: ${pic_extension})
+  -t|target [name] change the destination directory (default: ${today})
+  -h|help       Display this message
+  -v|version    Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":d:e:ht:v" opt
+do
+  case $opt in
+
+    d|dir      )  dcim_path="$OPTARG";;
+
+    e|ext      )  pic_extension="$OPTARG";;
+
+    h|help     )  usage; exit 0   ;;
+
+    t|target   )  today="$OPTARG";;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+export studio_path=~/Pictures/${today}
+export presence_check=$(adb shell exit 2>&1)
+export pic_list=$(adb shell ls $dcim_path/*.${pic_extension} 2>&1 | 
+    sed -e 's/[^[:print:]]*//g' ) #-e 's/^/"/' -e 's/$/"/') #-e 's_(_\\(_g' -e 's_)_\\)_g')
+
+[[ $presence_check == '' ]] || die 3 "No adb device found"
+[[ $pic_list == "${dcim_path}/*.${pic_extension}: No such file or directory" ]] && die 1 'Nothing to transfer'
+
+mkdir -p $studio_path && cd $studio_path || die 2 "Could not make directory $studio_path"
+for pic in ${pic_list[@]} 
+do
+    # Money line
+    adb pull "\"$pic\"" .   # <-- crazy quoting here to have quotes left in the adb subshell 
+    adb shell rm "\"$pic"\" # This is for filenames like img2309_0(0).jpg (note the parens)
+done
+
+# cleanup the files names with parenthesis
+# Strip the closing and convert the opening to '_'
+for rename in $(ls -1 *\).*)
+do
+    mv $rename ${rename//)/}
+done
+for rename in $(ls -1 *\(*)
+do
+    mv $rename ${rename//\(/_}
+done
+
+echo "Pictures are now located in ${studio_path} and deleted from camera."
+
+#===============================================================================
+#   STATISTICS / CLEANUP
+#===============================================================================
+exit 0

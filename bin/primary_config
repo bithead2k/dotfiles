@@ -1,0 +1,114 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: primary_config
+# 
+#         USAGE: ./primary_config 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 06/30/2016 13:27
+#      REVISION:  ---
+#===============================================================================
+
+function usage() {
+    echo Usage:
+    echo ${0##/*/} hostname
+    echo i.e. ${0##/*/} cmcdbw02d.d
+    exit 1
+}
+
+function die() {
+    echo "$1"
+    exit 1
+}
+
+[[ $# -ne 1 ]] && usage
+
+# set -o nounset                              # Treat unset variables as an error
+
+function get_host_name_from_ip {
+    [[ -z "$1" ]] && return 1
+    dig -x $1 +short 2>/dev/null |
+		grep "^[^[:digit:]]" | # | awk -F. '{print $1}'"
+        sed 's/[\.[:space:]]*$//'
+}
+
+function pgsql() {
+    hostname="$1"
+    db=$2
+    sql="$3"
+	ssh sync01ad.d.tripadvisor.com "PGCONNECT_TIMEOUT=5 psql -P pager=off -v ON_ERROR_STOP=1 -h $hostname -U dbadmin $db -qtAc '$sql' 2>/dev/null " 
+}
+
+function translate_name() {
+    local slave_name="$1"
+    local cname_match="$2"
+    [[ "${slave_name}" =~ "$cname_match" && $(echo "${slave_name}" | sed 's/[^[:digit:]]//g') -ne 0 ]] && {
+        #grab the digits from the right
+        slave_name=$(expr match "${slave_name}" "\(.*$cname_match\).*")$(printf '%02i' $(echo "${slave_name}" | sed 's/[^[:digit:]]//g'))
+    }
+    echo "$slave_name"
+}
+
+tmpfile="$(mktemp)"
+hname="$(active_host $1)"
+
+echo "xfer_type|master|from|to|target|hostname" > "$tmpfile"
+sql='SELECT datname FROM pg_catalog.pg_database WHERE datname NOT IN ($$postgres$$,$$template1$$,$$template0$$,$$tripmaster_master$$,$$tripmaster_slave$$)'
+databases=( $(pgsql $hname postgres "$sql" | tr '\n' ' ' | tr -d '\r') )
+#(>&2 echo "${databases[@]}") 
+for db in "${databases[@]}"
+do
+    sql='SELECT slavename FROM dbmirror_mirrorhost'
+    #(>&2 echo -n "pgsql ")
+    #(>&2 echo -n "$1 ")
+    #(>&2 echo -n "$db ")
+    #(>&2 echo "\"$sql\"")
+    slaves_pgsync=( $(pgsql "$hname" "$db" "$sql" | tr '\n' ' ' | tr -d '\r') )
+    [[  -z slaves_pgsync ]] && continue  #dbmirror_mirrorhosts didn't exist, or was empty
+    #(>&2 echo "${slaves_pgsync[@]}") 
+    for slave_name in "${slaves_pgsync[@]}"
+    do
+       #(>&2 echo "sn: $slave_name yada")
+       [[ $slave_name == 'syncdb' ]] && slave_name=sync-db-${db//tripmaster_/}
+       [[ $slave_name == 'secondary' ]] && slave_name=slave-db-${db//tripmaster_/}
+       slave_name=${slave_name//_clone}
+       slave_name=${slave_name//-new}
+       [[ $slave_name == 'tm02' ]] && slave_name=tm02n
+       [[ ${slave_name:0:3} == "dbr" ]] && slave_name=${slave_name}.${slave_name:(-1)}
+       slave_name=$(translate_name $slave_name journal)
+       slave_name=$(translate_name $slave_name pins)
+       [[ $db == 'tripmaster_ftl_transaction' ]] && [[ $slave_name == 'sync-db-ftl_transaction' ]] && slave_name=sync-db-ftltrans
+       [[ $db == 'tripmaster_ftl_transaction' ]] && [[ $slave_name == 'slave-db-ftl_transaction' ]] && slave_name=slave-db-ftltrans
+       [[ $db == 'tripmaster_ftl_inbox' ]] && [[ $slave_name == 'sync-db-ftl_inbox' ]] && slave_name=sync-db-ftlinbox
+       [[ $db == 'tripmaster_ftl_inbox' ]] && [[ $slave_name == 'slave-db-ftl_inbox' ]] && slave_name=slave-db-ftlinbox
+       [[ $db == 'tripmaster_active_email' ]] && [[ $slave_name == 'sync-db-active_email' ]] && slave_name=sync-db-email
+       [[ $db == 'tripmaster_active_email' ]] && [[ $slave_name == 'slave-db-active_email' ]] && slave_name=slave-db-email
+       [[ $db == 'tripmaster_active_vrpii' ]] && [[ $slave_name == 'sync-db-active_vrpii' ]] && slave_name=sync-db-vrpii
+       [[ $db == 'tripmaster_active_vrpii' ]] && [[ $slave_name == 'slave-db-active_vrpii' ]] && slave_name=slave-db-vrpii       
+       [[ $db == 'site_instrumentation' ]] && [[ $slave_name == 'sync-db-site_instrumentation' ]] && slave_name=syncdb02d.d      
+       slave_host=$(active_host $slave_name)
+       echo "pg_sync|$hname|$db|$([[ ${slave_name:0:2} == "tm" ]] && echo tripmonster || echo $db)|$slave_name|$slave_host" >> "$tmpfile"
+    done
+done
+sql='SELECT client_addr FROM pg_stat_replication'
+slaves=$(pgsql $hname postgres "$sql")
+#(>&2 echo "${slaves[@]}")
+for slave in ${slaves[@]}
+do
+    echo -en "internal|$1|all|all|$slave|" >> "$tmpfile"
+    get_host_name_from_ip $slave  >> "$tmpfile"
+
+done
+
+cat  "$tmpfile" | column -t -s'|'
+
+
+rm $tmpfile

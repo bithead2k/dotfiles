@@ -1,0 +1,45 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  evernote2obsidian
+# 
+#         USAGE:  ./evernote2obsidian 
+# 
+#   DESCRIPTION:  Convert .enex (Evernote) to .md (Osidian flavored Markdown)
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/21/2023 09:07:53 AM CST
+#      REVISION:  ---
+#===============================================================================
+# work as a filter, not a file parser
+## UUOC to illustrate we're pulling STDIN
+evernote_file="$@"
+markdown_file="${evernote_file//.enex/.md}"
+temp_file="${evernote_file//.enex/.xml}"
+note_title=$(xmllint --xpath "//en-export/note/title/text()" "$evernote_file")
+note_date=$(xmllint --xpath '//en-export/note/created/text()' "$evernote_file" |
+    sed -e 's/T/ /' -e 's/Z/ UTC/' -e 's/^\(.\{4\}\)\(.\{2\}\)\(.\{5\}\)\(.\{2\}\)\(.*\)$/\1-\2-\3:\4:\5/')
+note_change=$(xmllint --xpath '//en-export/note/updated/text()' "$evernote_file" |
+    sed -e 's/T/ /' -e 's/Z/ UTC/' -e 's/^\(.\{4\}\)\(.\{2\}\)\(.\{5\}\)\(.\{2\}\)\(.*\)$/\1-\2-\3:\4:\5/')
+note_author=$(xmllint --xpath "//en-export/note/note-attributes/author/text()" "$evernote_file")
+xml_grep --text_only 'content' "$evernote_file" > "${temp_file}"
+contents_cdata=$(xmllint --format "${temp_file}" | sed -e '/xml version=/d' -e '/en-note/d')
+
+cat <<EOF > "$markdown_file"
+---
+title: $note_title
+date: $(date --date="$note_date" +"%Y-%m-%d")
+time: $(date --date="$note_date" +"%H:%M:%S %Z")
+changed: $(date --date="$note_changed" +"%Y-%m-%d %H:%M:%S %Z")
+author: $note_author
+---
+
+$contents_cdata
+
+EOF

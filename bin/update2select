@@ -1,0 +1,40 @@
+#!/bin/bash
+shopt -s nocasematch
+# Read input from stdin or first argument
+input="${1:-/dev/stdin}"
+
+keywords=()
+keywords+=('WHERE')
+keywords+=('FROM')
+keywords+=('ORDER BY')
+keywords+=('LIMIT')
+keywords+=('SET')
+
+function string_to_next_keyword(){
+
+lastposition=10000
+
+for word in ${keywords[*]}
+do
+    set -x
+    newlength=${input%%"$word"*}  # remove from word to EOL, if found
+    position=$((${#newlength} + 1)) # length of new string +1 is found word
+    if [ $position -lt $lastposition ]; then
+        lastposition=$position
+    fi
+    set +x
+done
+
+if [ $lastposition -eq 10000 ]; then
+    return 0
+fi
+
+echo "${input:0:$lastposition}"
+
+}
+
+input=$(cat "$input" | sed 's/^[[:space:]]*UPDATE[[:space:]]*//I')
+
+echo "$input" | string_to_next_keyword
+
+# echo -e "$input"

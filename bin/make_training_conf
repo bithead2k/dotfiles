@@ -1,0 +1,98 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: make_training_conf
+# 
+#         USAGE: ./make_training_conf 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 03/01/2019 14:53
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+#set -x
+
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -f|file [name] Name of output file
+  -h|help        Display this message
+  -v|version     Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+# Output to stdout if not specified
+filename=-
+
+while getopts ":f:hv" opt
+do
+  case $opt in
+
+    f|file     ) filename="$OPTARG";;
+
+    h|help     )  usage; exit 0   ;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+function get_pick {
+
+    pick=0                        # Default is nothing picked
+    if ! read -p "$1" -t 10 pick  # Timeout in 10 seconds
+    then
+        return 1                  # Abend if no pick
+    fi
+    [[ $pick -gt 0 ]] || return 1 #nothing picked.  timeout
+    echo $pick
+}
+
+#pushd ~/source/2q/courses/Courses/Immersion > /dev/null
+course_list="$(ls *.md | sed -e 's/\.md$//' | sort) exit"
+echo "$course_list" | option_list_from_file
+pick=$(get_pick "Pick a course by the number: [none] ")
+while [[ ! -z "$pick" ]]
+do
+    # Get the picked course
+    course=$(echo "$course_list" | sed -ne "${pick}p")
+    # Remove this course from the list
+    course_list=$(echo "$course_list" | sed "/^[[:space:]]*$course[[:space:]]*$/d")
+    # Remove some illegal characters
+    course=$(echo "$course" | sed -e 's/[ ,].*$//' -e '/^[[:space:]]*$/d')
+    # Add the course to the output
+    echo "$course" >> "$filename"
+    # Re-display the rest of the list
+    echo "$course_list" | option_list_from_file
+    # Make a new pick or exit
+    pick=$(get_pick "Pick a course by the number: [none] ")
+done
+
+

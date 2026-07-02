@@ -1,0 +1,27 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  nf
+# 
+#         USAGE:  ./nf 
+# 
+#   DESCRIPTION:  Find in pandoc notes
+#       notes are in markdown form and some are in pdf.
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  My personal journal is in ~/Documents/pandoc_notes
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  08/12/2022 09:42:51 AM CDT
+#      REVISION:  ---
+#===============================================================================
+
+pushd ~/Documents/notes >/dev/null 2>&1
+IFS=$'\n'
+for note in $(find . -name "*.md")
+do
+    grep -Hni "$@" -B2 -A3 --color=auto "$note"
+done
+popd

@@ -1,0 +1,33 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: format_l1_status
+# 
+#         USAGE: ./format_l1_status 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 11/09/2018 10:34
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+customer=
+ticket=
+ticket=${1:-}
+[[ "$ticket" == "" ]] && {
+    ticket=$(pbpaste)
+    ticket=${ticket//[^[:digit:]]*/}
+    ticket=$((ticket))
+} || customer=${2:-}
+[[ $ticket -eq 0 ]] && ticket=$(cat -)
+
+echo "| [#$ticket](https://access.2ndquadrant.com/rt/ticket/$ticket) | [$customer](https://access.2ndquadrant.com/customer_portal/company/$customer) | [chat](https://chat.2ndquadrant.com/secondquadrant/channels/rt$ticket) | | |"
+

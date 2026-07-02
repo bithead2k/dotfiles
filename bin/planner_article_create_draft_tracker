@@ -1,0 +1,154 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  planner_article_create_draft_tracker
+# 
+#         USAGE:  ./planner_article_create_draft_tracker 
+# 
+#   DESCRIPTION:  Given a text file with some chapter headers,
+#                  print a project tracker to paste into the planner
+#       OPTIONS:  text_file_name.txt
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  01/11/2023 05:03:19 PM CST
+#      REVISION:  ---
+#===============================================================================
+
+#Content of the text file: (without comments, of course)
+# ---
+# some tags
+# ---
+# possible blank lines
+#My Journey into Madness
+#Who this article is for
+#    Why this article exists
+#    What you can get out of this article
+#    What you won't get out of this article
+#The days of glory past
+#    Doing it the hard way
+#    800 ways not to make a dashboard
+#    Success: At a cost
+#The Revelations of St. Kirk of the tortured soul
+#    The cloud is not inherently evil
+#    The database is not a stupid data bucket
+#    The guilty pleasure of coding in the database
+#What your momma didn't tell you about
+#    Time series is everywhere
+#    If you build it they will come
+#Do the next right thing
+
+# The markdown will look like this:
+
+### My Journey into Madness
+
+### Outline
+
+#**Wednesday, the Eleventh of January, in the year of our Lord 2023 W02 G011**
+
+#       S M T W T F S S
+# - [ ] ——————————————— · 01: Who this article is for
+# - [ ] ——————————————— · 01.A: Why this article exists
+# - [ ] ——————————————— · 01.B: What you can get out of this article
+# - [ ] ——————————————— · 01.C: What you won't get out of this article
+# - [ ] ——————————————— · 02: The days of glory past
+# - [ ] ——————————————— · 02.A: Doing it the hard way
+# - [ ] ——————————————— · 02.B: 800 ways not to make a dashboard
+# - [ ] ——————————————— · 02.C: Success: At a cost
+# - [ ] ——————————————— · 03: The Revelations of St. Kirk of the tortured soul
+# - [ ] ——————————————— · 03.A: The cloud is not inherently evil
+# - [ ] ——————————————— · 03.B: The database is not a stupid data bucket
+# - [ ] ——————————————— · 03.C: The guilty pleasure of coding in the database
+# - [ ] ——————————————— · 04: What your momma didn't tell you about
+# - [ ] ——————————————— · 04.A: Time series is everywhere
+# - [ ] ——————————————— · 04.B: If you build it they will come
+# - [ ] ——————————————— · 05: Do the next right thing
+#       S M T W T F S S
+
+# The - [ ] will turn into a check box
+# followed by a long line for dot journal-ing
+# followed by the indented outline
+
+#set -x
+
+outlinefile="$1"
+#pdffile="${outlinefile//.txt/.pdf}"
+outlinelength=0
+
+function die(){
+    retval=$1
+    shift
+    echo -e "$@"
+    exit retval
+}
+
+function strip_tags(){
+  # tear off the leading lines with
+  # ---
+  # tag: 
+  # ---
+  sed -e '/^[[:space:]]*$/d' | perl -pe 's/\n/µ/g' 2>/dev/null | sed -e 's/^.*---µ//' -e 's/µ/\n/g'
+}
+
+article_title=$(cat "${outlinefile}" | strip_tags | head -n 1)
+markdownfile="/home/kroybal/Documents/notes/articles/Draft Tracker - ${article_title}.md"
+
+[[ -s "${outlinefile}" ]] || die 1 "Can't find ${outlinefile}, or it's empty."
+
+outlinelength=$(cat "${outlinefile}" | strip_tags | sed -e '/^[[:space:]]*$/d' -e '1d' | wc -l)
+(( outlinelength-- ))  # subtract the title
+[[ $outlinelength -lt 1 ]] && die 2 "The outline doesn't have any chapters."
+
+# stupid hole punched paper
+header=$(cat <<EOF
+---
+title: ${article_title}
+date: $(date +"%Y-%m-%d")
+geometry:
+ - margin=1mm
+ - left=15mm
+---
+
+# ${article_title}
+
+## Draft Tracker
+
+**$(anno_domini)**
+
+            S  M  T  W  T  F  S  S
+EOF
+)
+section_counter=0
+subsection_counter=0
+subsection_literals="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+# clobber any working file
+echo -e "$header" > "${markdownfile}"
+IFS=$'\n'
+
+while read -r chapter
+do
+    [[ "${chapter:0:1}" != " " ]] && {
+        (( section_counter++ ))
+        subsection_counter=-1 
+        subsection=""
+    } || {
+        (( subsection_counter++ ))
+        subsection=".${subsection_literals:$subsection_counter:1}"
+    }
+    # clean off the leading space
+    chapter=$(echo ${chapter} | sed -e 's/^[[:space:]]*//g')
+    # add the dot journal tracker
+    chapter="$(printf '%02i' ${section_counter})${subsection}: $chapter"
+    echo  - [ ] ——————————————— · $chapter >> "${markdownfile}"
+done <<< $(cat "${outlinefile}" | strip_tags | sed -e '1d')
+
+# The outline file, minus the title and blank lines.
+echo -e "\n         S  M  T  W  T  F  S  S" >> "${markdownfile}"
+
+# pandoc -s --pdf-engine=xelatex -o "${pdffile}" "${markdownfile}"
+# lpr "${pdffile}"
+# rm "${markdownfile}"
+# rm "${pdffile}"

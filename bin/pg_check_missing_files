@@ -1,0 +1,49 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: pg_check_missing_files
+# 
+#         USAGE: ./pg_check_missing_files 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: William Ivanski, william.ivanski@2ndquadrant.com / Kirk Roybal, kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 01/28/2019 12:23
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+
+# PostgreSQL version
+psql -c "select version()"
+
+# Database size
+psql -c "select datname, pg_size_pretty(pg_database_size(oid)) from pg_database"
+
+# Checking for missing files
+for database in $(psql -At -c "select datname from pg_database where not datistemplate")
+do
+    echo "DATABASE: $database"
+    echo ""
+    for relation in $(psql -d $database -At -c "select c.relkind, quote_ident(n.nspname) || '.' || quote_ident(c.relname) as tablename, pg_relation_filepath(quote_ident(n.nspname) || '.' || quote_ident(c.relname)) as filepath from pg_class c inner join pg_namespace n on n.oid = c.relnamespace where c.relkind in ('r', 'i', 'S', 't')")
+    do
+        type=$(echo $relation | cut -d'|' -f1)
+        name=$(echo $relation | cut -d'|' -f2)
+        file=$(echo $relation | cut -d'|' -f3)
+        case $type in
+            'r') echo "TABLE $name" ;;
+            'i') echo "INDEX $name" ;;
+            'S') echo "SEQUENCE $name" ;;
+            't') echo "TOAST $name" ;;
+        esac
+        psql -t -c "select pg_stat_file('$file')"
+    done
+    echo "----------------------"
+    echo ""
+done

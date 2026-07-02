@@ -1,0 +1,49 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: clean_receipts
+# 
+#         USAGE: ./clean_receipts 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 10/07/2019 12:03
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+set -x
+
+# remove spaces
+IFS=$'\n'
+for file in $(ls -1 *.jpg | grep " ")
+do
+    mv "$file" "${file// /_}"
+done
+
+# deduplicate underscores
+for file in $(ls -1 *.jpg | grep "__")
+do
+    mv "$file" "${file//__/_}"
+done
+
+# Deduplicate periods
+for file in $(ls -1 *.jpg | grep "\..*\.")
+do
+    mv "$file" "${file//\.\./\.}"
+    # if we still have a period, just delete it.
+    [[ $(echo "${file//.jpg/}" | grep "\.") == "" ]] || mv "$file" "${file/\./}"
+done
+
+# remove commas
+for file in $(ls -1 *.jpg | grep ",")
+do
+    mv "$file" "${file//,/}"
+done
+

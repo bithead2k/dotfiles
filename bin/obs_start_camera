@@ -1,0 +1,24 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  obs_start_camera
+# 
+#         USAGE:  ./obs_start_camera 
+# 
+#   DESCRIPTION:  Start the virtual camera
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  03/03/2023 12:19:30 AM CST
+#      REVISION:  ---
+#===============================================================================
+
+# Press the button in OBS
+xdotool search --name '^OBS Studio .+$' windowactivate --sync key ctrl+shift+C
+sleep 2
+xdotool keydown Shift key h keyup Shift key o key p key l key o key p key h key o key b key e key 1 key 'exclam' Return

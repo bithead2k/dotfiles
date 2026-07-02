@@ -1,0 +1,99 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: option_list_from_file
+# 
+#         USAGE: ./option_list_from_file 
+# 
+#   DESCRIPTION: list a file, add line numbers as choices, and format across screen.
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 03/04/2016 11:15
+#      REVISION:  ---
+#===============================================================================
+
+
+ScriptVersion="1.0"
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -f|file name  File to read (Default STDIN)
+  -h|help       Display this message
+  -v|version    Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+filename='-'
+logging=0
+while getopts ":f:lhv" opt
+do
+  case $opt in
+
+    f|file     )  filename=$OPTARG;;
+
+    h|help     )  usage; exit 0   ;;
+
+    l|log      )  (( logging++ )) ;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+[[ $logging -gt 2 ]] && set -x
+
+raw=$(cat $filename)
+[[ $logging -gt 1 ]] && echo "raw: $raw"
+longopt=$(echo -e "$raw" | wc -L)
+(( longopt+=5 )) # for the line numbers and space
+[[ $logging -gt 0 ]] && echo "longopt: $longopt"
+options=(${raw})
+[[ $logging -gt 0 ]] && echo "option1: ${options[0]}"
+[[ $logging -gt 1 ]] && echo "option all: ${options[*]}"
+opcount=${#options[*]}
+[[ $logging -gt 0 ]] && echo "opt count: $opcount"
+ssize=$(tput cols)
+[[ $logging -gt 0 ]] && echo "screen size: $ssize"
+(( cols=ssize/longopt ))
+[[ $logging -gt 0 ]] && echo "screen cols: $cols"
+(( lines=opcount/cols+1 ))
+[[ $logging -gt 0 ]] && echo "screen lines: $lines"
+output=
+for ((line=0;line<lines;line++))
+do
+    for (( i=0;i<cols;i++ ))
+    do
+        (( item=line+(i*lines)+1 )) #screen selection is 1 based
+        (( idx=item-1 )) #array is 0 based
+        [[ $logging -gt 0 ]] && echo -en "\nline i cols item: $line $i $cols $item   : "
+        output="$output $(printf '%02i: ' $item)"
+        output="$output $(printf "${options[$idx]}\t")"
+        [[ $logging -gt 0 ]] && echo $output
+    done
+    output="$output\n"
+done
+printf "$output" | column -t
+

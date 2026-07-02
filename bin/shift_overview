@@ -1,0 +1,35 @@
+#!/opt/local/bin/bash
+#===============================================================================
+#
+#          FILE: shift_overview
+# 
+#         USAGE: ./shift_overview 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 12/17/2018 11:10
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+cat <<EOF
+## S2
+
+| Ticket | Customer | Chat | Problem | Situation |
+|---|---|---|---|---|---|
+EOF
+
+IFS=$'\n'
+for ticket in $(<ticket.lst)
+do
+
+     eval "format_l1_status $ticket"
+
+done

@@ -1,0 +1,34 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  pg_catalog_find
+# 
+#         USAGE:  ./pg_catalog_find 
+# 
+#   DESCRIPTION:  Find some data in the PostgreSQL catalog
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  09/04/2022 09:47:10 AM CDT
+#      REVISION:  ---
+#===============================================================================
+
+sql="
+SELECT table_name 
+FROM information_schema.tables 
+WHERE table_schema='pg_catalog';
+"
+table_list=$(psql -qtAc "$sql")
+
+for table in ${table_list[@]}
+do
+    sql="SELECT * FROM pg_catalog.$table"
+    echo "pg_catalog.$table"
+    psql -qtAc "$sql" | grep "$1"
+    
+done | grep -B1 "$1"

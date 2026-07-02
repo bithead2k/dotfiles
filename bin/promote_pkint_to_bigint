@@ -1,0 +1,694 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: promote_pkint_to_bigint
+# 
+#         USAGE: ./promote_pkint_to_bigint 
+# 
+#   DESCRIPTION: Tables using a primary key of int may run out of values at 2^16-1
+#         This script creates a bigint shadow column for the pk, populates it, and then
+#         promotes it to a primary key.
+#
+#       OPTIONS: the table name
+#  REQUIREMENTS: ---
+#          BUGS: Does not handle ids that are a parent key 
+#           (does not re-create RI on children)
+#           Does not handle columns that are not the pkey
+#           Does not VACUUM or clean up after mass updates
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (), kirk.roybal@2ndquadrant.com
+#  ORGANIZATION: 
+#       CREATED: 03/04/2020 10:24
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+ScriptVersion="1.0"
+hostname="localhost"
+database="$USER"
+username="$USER"
+relation="unset_by_user"
+schemata="public"
+loglevel=0
+batching=10000
+sleeping=5
+
+# Prompt the user to proceed in spite of errors
+function maybe_exit {
+    echo -n "Proceed anyway? (y/[N]) "
+    read y
+    if [[ $y == "y" ]]
+    then
+        return 0
+    fi
+    echo "Aborted by user request"
+    exit 1
+}
+#-------------------------------------------------------------------------------
+# source the SysV init scripts to show success/failure
+#-------------------------------------------------------------------------------
+mydir=$(dirname "$0")
+[[ -f $mydir/functions ]] && . $mydir/functions
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  assert_condition
+#   DESCRIPTION:  assert that a condition is true
+#    PARAMETERS:  name of test, condition to assert, conditional operator, expected result
+#       RETURNS:  pass/fail 0/1
+#-------------------------------------------------------------------------------
+function assert_condition () {
+    test_message=$1
+    test_cmd=$2
+    test_operator=$3
+    test_condition=${4:-}
+
+	echo -n "$test_message   "
+	result=1  #presume failure
+	case $test_operator in
+		"=")      fail_msg="$test_cmd $test_operator $test_condition"; [[ $($2) -eq $4 ]] && result=0 || result=1 ;;
+		"<>")     fail_msg="$test_cmd $test_operator $test_condition"; [[ $($2) -ne $4 ]] && result=0 || result=1 ;;
+		">")      fail_msg="$test_cmd $test_operator $test_condition"; [[ $($2) -gt $4 ]] && result=0 || result=1 ;;
+		"<")      fail_msg="$test_cmd $test_operator $test_condition"; [[ $($2) -lt $4 ]] && result=0 || result=1 ;;
+		">=")     fail_msg="$test_cmd $test_operator $test_condition"; [[ $($2) -ge $4 ]] && result=0 || result=1 ;;
+		"<=")     fail_msg="$test_cmd $test_operator $test_condition"; [[ $($2) -le $4 ]] && result=0 || result=1 ;;
+		"same")   fail_msg="$test_cmd == $test_condition"; [[ "$($2)" = "$4" ]] && result=0 || result=1 ;;
+		"unlike") fail_msg="$test_cmd != $test_condition"; [[ "$($2)" != "$4" ]] && result=0 || result=1 ;;
+		"empty")  fail_msg="$test_cmd == ''"; [[ -z "$($2)" ]] && result=0 || result=1 ;;
+		"exist")  fail_msg="$test_cmd <> ''"; [[ ! -z "$($2)" ]] && result=0 || result=1 ;;
+		"exit0")  eval $2; result=$?
+			      fail_msg="$test_cmd returns $result expected 0"
+			      [[ $result -eq 0 ]] && result=0 || result=1 ;;
+		"exit!0") eval $2; result=$?
+			      fail_msg="$test_cmd returns $result expected !0"
+			      [[ $result -ne 0 ]] && result=0 || result=1 ;; 
+		*)        echo -n "  operator not supported"; result=1 ;; 
+	esac    # --- end of case ---
+	[[ $result -eq 0 ]] && {
+		success "$1"
+		} || {
+		failure "$1"
+		echo ""
+		echo -n "$fail_msg"
+		(( failures++ )) #global accumulator
+		}
+	echo ""  #add a carriage return
+    #preserve the ability to check after each test
+    return $result
+}  # <-- end assert_condition
+
+#-------------------------------------------------------------------------------
+# global test failure accumulator
+#-------------------------------------------------------------------------------
+failures=0
+
+
+#-------------------------------------------------------------------------------
+# Test for the existence of psql
+#-------------------------------------------------------------------------------
+#SSH="ssh -o LogLevel=quiet -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ConnectTimeout=2"
+SSH="ssh -o BatchMode=yes -o LogLevel=quiet -o StrictHostKeyChecking=no -o ConnectTimeout=2"
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  find_psql
+#   DESCRIPTION:  find the client binary somewhere on the system
+#    PARAMETERS:  none
+#       RETURNS:  fully qualified path to psql
+#-------------------------------------------------------------------------------
+function find_psql ()
+{
+    #see if pg_config is configured
+    local pgc=$(which pg_config &> /dev/null) 
+	[[ ! -z $pgc ]] || bindir=
+	[[ ! -z $pgc ]] && bindir=$($pgc --bindir)
+	[[ ! -z $bindir ]] || psql_bin=
+	[[ ! -z $bindir ]] && psql_bin=$bindir/psql
+	[[ -x $psql_bin ]] && {
+        echo $psql_bin
+        return 0
+    }
+    #if not, use the local path
+	psql_bin=$(which psql 2>/dev/null)
+    [[ -x $psql_bin ]] && {
+        echo $psql_bin
+        return 0
+    }
+    #if that fails, just go fishing
+	[[ -x /usr/bin/psql ]] && {
+        echo /usr/bin/psql
+        return 0
+    }
+	[[ -x /usr/local/pgsql/bin/psql ]] && {
+        echo /usr/local/pgsql/bin/psql
+        return 0
+    }
+	[[ -x /opt/local/bin/psql ]] && {
+        echo /opt/local/bin/psql
+        return 0
+    }
+}	# ----------  end of function find_psql  ----------
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  find_timeout
+#   DESCRIPTION:  get a timeout executable
+#    PARAMETERS:  none
+#       RETURNS:  qualified path to timeout
+#-------------------------------------------------------------------------------
+function find_timeout ()
+{
+    local to=$(which timeout)
+    [[ -x $to ]] && {
+        echo "$to -s 9 3s "
+        return 0
+    }
+    [[ -x /opt/local/bin/gtimeout ]] && {
+        echo "/opt/local/bin/gtimeout -s 9 3s "
+        return 0
+    }
+    return 1
+}	# ----------  end of function find_timeout  ----------
+
+PSQL=$(find_psql)
+[[ -z $PSQL ]] && {
+    echo "** FATAL ** Could not find psql binary; can't continue."
+    exit 1
+}
+
+PSQL="$(find_timeout) $PSQL -v ON_ERROR_STOP=1 "
+
+# Since all the functions below are dual-purpose, this is convenience
+# helper.  If called with "show", it prints out the status message and
+# returns 1.  If called with any other command, it is a no-op.
+function status_msg {
+    if [ "$1" == "show" ]
+    then
+        echo "$2"
+        return 1
+    else
+        return 0
+    fi
+}
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  can_ssh
+#   DESCRIPTION:  make the simplest possible connection to a foreign system
+#    PARAMETERS:  hostname
+#       RETURNS:  0 on success
+# See if we can connect at all.  Return 0 if we can.
+#-------------------------------------------------------------------------------
+function can_ssh {
+    [[ -z ${1:-} ]] && return 1
+    $SSH root@$1 exit >& /dev/null
+}
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  can_ping
+#   DESCRIPTION:  check icmp for connectivity
+#    PARAMETERS:  hostname
+#       RETURNS:  0 on success
+#-------------------------------------------------------------------------------
+function can_ping {
+    [[ -z ${1:-} ]] && return 1
+    ping -c2 -i 0.2 -W2 $1 >& /dev/null
+}
+
+function check_ping {
+    local cmd=$1
+    local hostname=$2
+
+    $(can_ping $hostname) && {
+        status_msg $cmd "Ping OK"
+        return 0
+    }
+    status_msg $cmd "No ICMP Ping Response" || return
+    echo "** WARNING ** No ping response from $hostname"
+    maybe_exit
+}
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  can_pg_connect
+#   DESCRIPTION:  can talk to postgres on port 5432
+#    PARAMETERS:  hostname
+#       RETURNS:  0 success/1 failure
+#-------------------------------------------------------------------------------
+function can_pg_connect ()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+
+    [[ -z $hostname ]]  && return 1
+    [[ $($PSQL -h $l_hostname $l_database -U $l_username -qtAc 'SELECT 1') == "1" ]]  && return 0
+    return 1
+}	# ----------  end of function can_pg_connect
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  table_exists
+#   DESCRIPTION: check that a table exists in the current connection 
+#    PARAMETERS:  host, db, user, table
+#       RETURNS:  0 or 1 exit
+#-------------------------------------------------------------------------------
+function table_exists()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_relation=${4:-}
+    local l_schemata=${5:=}
+    local l_sql="SELECT COALESCE((SELECT true FROM information_schema.tables
+    WHERE table_name = '$l_relation' AND table_schema = '$l_schemata'),false);"
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    [[ $($PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql") == "t" ]]  && return 0
+    return 1
+}
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  table_oid
+#   DESCRIPTION: get the oid of the table 
+#    PARAMETERS:  
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+
+function table_oid()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_relation=${4:-}
+    local l_schemata=${5:=}
+    local l_sql="SELECT c.oid FROM pg_catalog.pg_class c LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname OPERATOR(pg_catalog.~) '^($l_relation)$' COLLATE pg_catalog.default
+AND n.nspname OPERATOR(pg_catalog.~) '^($l_schemata)$' COLLATE pg_catalog.default;"
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    $PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql"
+
+}
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  table_key_attributes
+#   DESCRIPTION: Get the primary key and it's attributes 
+#    PARAMETERS:  
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+function table_key_attributes()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_oid=${4:-}
+    local l_sql="WITH keys AS (
+    SELECT a.attname column_name,
+    pg_catalog.format_type(a.atttypid, a.atttypmod),
+    ( SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+    FROM pg_catalog.pg_attrdef d
+    WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef) def_value,
+    a.attnotnull can_not_be_null
+    FROM pg_catalog.pg_attribute a
+    WHERE a.attrelid = '$l_oid' AND a.attnum > 0 
+    AND NOT a.attisdropped 
+    AND pg_catalog.format_type(a.atttypid, a.atttypmod)='integer'
+    ORDER BY a.attnum)
+    SELECT count(*) OVER (), * FROM keys WHERE left(def_value,7) = 'nextval'; "
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    $PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql"
+
+}
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  table_column_exists
+#   DESCRIPTION: Check if a column exists in a table 
+#    PARAMETERS:  
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+function table_column_exists()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_schemata=${4:-}
+    local l_relation=${5:-}
+    local l_newfield=${6:-}
+    
+    local l_sql="SELECT true FROM information_schema.columns WHERE
+    table_schema='$l_schemata' AND table_name='$l_relation' AND
+    column_name='$l_newfield';"
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    [[ $($PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql") == 't' ]] && return 0 || return 1
+
+}
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  table_add_bigint_column
+#   DESCRIPTION: Add a bigint column to the table with a predictable name 
+#    PARAMETERS:  
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+function table_add_bigint_column()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_schemata=${4:-}
+    local l_relation=${5:-}
+    local l_newfield=${6:-}
+    
+    local l_sql="ALTER TABLE $l_schemata.$l_relation ADD COLUMN $l_newfield bigint"
+    
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    $PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql" 2>/dev/null
+
+    return $?
+}
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  batch_update_key
+#   DESCRIPTION: Update the new key column with the values of the old key column 
+#    PARAMETERS:  
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+function batch_update_key()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_schemata=${4:-}
+    local l_relation=${5:-}
+    local l_oldfield=${6:-}
+    
+    local l_sql="WITH updates AS (
+    SELECT $l_oldfield 
+    FROM $l_schemata.$l_relation
+    WHERE ${l_oldfield}_new IS NULL
+    LIMIT $batching)
+    UPDATE $l_schemata.$l_relation n
+    SET ${l_oldfield}_new = n.${l_oldfield}
+    FROM updates o
+    WHERE n.$l_oldfield = o.$l_oldfield;"
+
+    local c_sql="SELECT count(*) 
+    FROM $l_schemata.$l_relation
+    WHERE ${l_oldfield}_new IS NULL;"
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    batches_left=$($PSQL -h $l_hostname $l_database -U $l_username -qtAc "$c_sql")
+    (( batches_left = batches_left / batching ))
+    (( batches_left++ ))
+    for ((i=1;i<=batches_left;i++))
+    do
+        echo -en "\nUpdating batch $i of $batches_left\n"
+        $PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql" 2>/dev/null
+        sleep 5
+    done
+
+}
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  trigge_create
+#   DESCRIPTION: Create a trigger on INSERT, UPDATE to mirror pkey to pkey_new 
+#    PARAMETERS:  
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+function trigger_create()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_schemata=${4:-}
+    local l_relation=${5:-}
+    local l_oldfield=${6:-}
+    
+    local l_sql="CREATE OR REPLACE FUNCTION ${l_schemata}_${l_relation}_track_pkey() RETURNS
+    TRIGGER
+    AS '
+    BEGIN
+        NEW.${l_oldfield}_new := NEW.$l_oldfield;
+        RETURN NEW;
+    END;
+    ' LANGUAGE plpgsql;
+
+    CREATE TRIGGER ${l_schemata}_${l_relation}_track_pkey
+    BEFORE INSERT OR UPDATE
+    ON $l_schemata.$l_relation
+    FOR EACH ROW EXECUTE PROCEDURE ${l_schemata}_${l_relation}_track_pkey();
+    "
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    $PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql"
+    return $?
+}
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  trigger_drop
+#   DESCRIPTION: Drop the {id}_new population trigger 
+#    PARAMETERS: 
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+function trigger_drop()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_schemata=${4:-}
+    local l_relation=${5:-}
+    
+    local l_sql="
+    DROP TRIGGER ${l_schemata}_${l_relation}_track_pkey ON $l_schemata.$l_relation;
+    DROP FUNCTION ${l_schemata}_${l_relation}_track_pkey();
+    "
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    $PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql"
+    return $?
+}
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  trigger_exists
+#   DESCRIPTION: Check for the existence of a specific trigger by name 
+#    PARAMETERS:  
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+function trigger_exists()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_schemata=${4:-}
+    local l_relation=${5:-}
+    local l_oldfield=${6:-}
+    
+    local l_sql="SELECT COALESCE((SELECT true FROM pg_trigger WHERE NOT tgisinternal AND
+    tgname = '${l_schemata}_${l_relation}_track_pkey'),false);"
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    [[ $($PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql" 2>/dev/null) == 't' ]] && return 0 || return 1
+
+}
+
+
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  column_type_bigint
+#   DESCRIPTION: Rename the temp column into place 
+#    PARAMETERS:  
+#       RETURNS:  
+#-------------------------------------------------------------------------------
+function column_type_bigint()
+{
+    local l_hostname=${1:-}
+    local l_database=${2:-}
+    local l_username=${3:-}
+    local l_schemata=${4:-}
+    local l_relation=${5:-}
+    local l_oldfield=${6:-}
+    local l_sequence=${7:-}
+    
+    # cheesy idempotency check 
+    table_column_exists $l_hostname $l_database $l_username $l_schemata $l_relation ${l_oldfield}_new || return 0
+
+    local quotes='$$'
+    local l_sql="BEGIN;
+    ALTER TABLE $l_schemata.$l_relation DROP COLUMN ${l_oldfield};  -- implicitly drops primary key
+    ALTER TABLE $l_schemata.$l_relation RENAME COLUMN  ${l_oldfield}_new TO ${l_oldfield};
+    ALTER TABLE $l_schemata.$l_relation ALTER COLUMN ${l_oldfield} SET DEFAULT
+    nextval($quotes$l_sequence$quotes::regclass);
+    ALTER TABLE $l_schemata.$l_relation ADD PRIMARY KEY ($l_oldfield);
+    DROP TRIGGER ${l_schemata}_${l_relation}_track_pkey ON $l_schemata.$l_relation;
+    DROP FUNCTION ${l_schemata}_${l_relation}_track_pkey();
+    COMMIT;
+    "
+
+    [[ $loglevel -gt 0 ]] && echo "$l_sql"
+
+    $PSQL -h $l_hostname $l_database -U $l_username -qtAc "$l_sql" 2>/dev/null
+    return $?
+}
+
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+function usage ()
+{
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Options: 
+  -b|batch  [size]  Number of records to update per batch
+  -h|host   [name]  Name of the PostgreSQL system
+  -l|logging        Cumulative logging level increase (i.e. -lll)
+  -r|rest   [secs]  Seconds to wait between batches
+  -s|schema [name]  Schema of the table
+  -t|table  [name]  Name of the relation with deficient pk
+  -v|version        Display script version
+
+	EOT
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+while getopts ":b:h:lr:s:t:v" opt
+do
+  case $opt in
+
+    b|batch    )  batching=$OPTARG;;
+
+    h|host     )  hostname=$OPTARG;;
+
+    l|log      )  (( loglevel++ )); [[ $loglevel -gt 2 ]] && set -x;;
+
+    r|rest     )  sleeping=$OPTARG;;
+
+    s|schema   )  schemata=$OPTARG;;
+
+    t|table    )  relation=$OPTARG;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage; exit 1   ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+#-------------------------------------------------------------------------------
+# Unit test the testing harness so we're not fighting fire with fire
+#-------------------------------------------------------------------------------
+echo "Unit tests for the testing framework."
+echo "-------------------------------------"
+assert_condition "unit =" "echo 1" "=" "1"
+assert_condition "unit <>" "echo 1" "<>" "2"
+assert_condition "unit >" "echo 2" ">" "1"
+assert_condition "unit <" "echo 1" "<" "2"
+assert_condition "unit >=" "echo 1" ">=" "1"
+assert_condition "unit >=" "echo 2" ">=" "1"
+assert_condition "unit <=" "echo 1" "<=" "1"
+assert_condition "unit <=" "echo 1" "<=" "2"
+assert_condition "unit same" "echo $0" "same" "$0"
+assert_condition "unit unlike" "echo $0" "unlike" "yada"
+assert_condition "unit empty" "echo " "empty"
+assert_condition "unit exist" "echo 1" "exist"
+assert_condition "unit exit0" "echo 1 > /dev/null" "exit0"
+assert_condition "unit exit!0" "test -f /no_file_here > /dev/null" "exit!0"
+echo ""
+echo "These unit tests will fail by design."
+echo "-------------------------------------"
+assert_condition "unit fail =" "echo 1" "=" "2"
+assert_condition "unit fail <>" "echo 1" "<>" "1"
+assert_condition "unit fail >" "echo 1" ">" "2"
+assert_condition "unit fail <" "echo 1" "<" "0"
+assert_condition "unit fail >=" "echo 1" ">=" "2"
+assert_condition "unit fail <=" "echo 1" "<=" "0"
+assert_condition "unit fail same" "echo 1" "same" "2"
+assert_condition "unit fail unlike" "echo 1" "unlike" "1"
+assert_condition "unit fail empty" "echo 1" "empty"
+assert_condition "unit fail exist" "" "exist"
+assert_condition "unit fail exit0" "test -f /file_not_here > /dev/null" "exit0"
+assert_condition "unit fail exit!0" "echo 1 > /dev/null" "exit!0"
+echo ""
+echo "Begin testing for upgrade conditions."
+echo "--------------------------------------"
+#-------------------------------------------------------------------------------
+# No tests should fail from this point forward
+#-------------------------------------------------------------------------------
+failures=0  # reset the accumulator
+#-------------------------------------------------------------------------------
+# Make as many assertions as we can before doing anything.
+#-------------------------------------------------------------------------------
+assert_condition "got psql?" "echo $PSQL" "exist"
+assert_condition "got SSH?" "echo $SSH" "exist"
+assert_condition "can PG connect?" "can_pg_connect $hostname $database $username" "exit0"
+
+#-------------------------------------------------------------------------------
+# if anything failed, ask the user if we continue, if not, don't ask
+#-------------------------------------------------------------------------------
+[[ $failures -gt 0 ]] && maybe_exit 
+failures=0 #the user didn't care about the previous failures (or there weren't any). 
+
+[[ $relation == "unset_by_user" ]] && relation=
+assert_condition "table is set $relation" "echo $relation" "exist"
+assert_condition "table exists $relation" "table_exists $hostname $database $username $relation $schemata" "exit0"
+relation_oid=$(table_oid $hostname $database $username $relation $schemata)
+assert_condition "table oid: $relation_oid" "echo $relation_oid" "exist"
+
+relation_attributes=$(table_key_attributes $hostname $database $username $relation_oid)
+assert_condition "pkey exists as integer" "echo $relation_attributes" "exist"
+[[ $loglevel -gt 0 ]] && echo $relation_attributes
+key_count=$(echo $relation_attributes | cut -d'|' -f 1)
+assert_condition "only one key supported" "echo $key_count" "=" "1"
+key_column=$(echo $relation_attributes | cut -d'|' -f 2)
+assert_condition "pkey column exists ($key_column)" "echo $key_column" "exist"
+key_type=$(echo $relation_attributes | cut -d'|' -f 3)
+assert_condition "key type is integer" "echo $key_type" "same" "integer"
+sequence_name=$(echo $relation_attributes | cut -d'|' -f 4 | sed -e "s/':.*//" -e "s/.*'//")
+assert_condition "sequence is default ($sequence_name)" "echo $sequence_name" "exist"
+assert_condition "new column doesn't exist ${key_column}_new" "table_column_exists $hostname $database $username $schemata $relation ${key_column}_new" "exit!0"
+
+#-------------------------------------------------------------------------------
+# if anything failed, ask the user if we continue, if not, don't ask
+#-------------------------------------------------------------------------------
+[[ $failures -gt 0 ]] && maybe_exit 
+failures=0 #the user didn't care about the previous failures (or there weren't any). 
+
+table_column_exists $hostname $database $username $schemata $relation ${key_column}_new || assert_condition "Add the shadow column ${key_column}_new" "table_add_bigint_column  $hostname $database $username $schemata $relation ${key_column}_new" "exit0"
+
+#-------------------------------------------------------------------------------
+# if anything failed, ask the user if we continue, if not, don't ask
+#-------------------------------------------------------------------------------
+[[ $failures -gt 0 ]] && maybe_exit 
+failures=0 #the user didn't care about the previous failures (or there weren't any). 
+
+trigger_exists $hostname $database $username $schemata $relation ${key_column} ||
+    assert_condition "Create Trigger" "trigger_create $hostname $database $username $schemata $relation ${key_column}" "exit0"
+
+assert_condition "Trigger to track changes installed" "trigger_exists $hostname $database $username $schemata $relation ${key_column}" "exit0"
+
+assert_condition "Batch update ${key_column}_new" "batch_update_key $hostname $database $username $schemata $relation ${key_column} " "exit0"
+
+assert_condition "Column ${key_column} is of type bigint" "column_type_bigint $hostname $database $username $schemata $relation ${key_column} $sequence_name" "exit0"
+
+trigger_exists $hostname $database $username $schemata $relation ${key_column} && assert_condition "Trigger to track changes dropped" "trigger_drop  $hostname $database $username $schemata $relation" "exit0"
+
+
+

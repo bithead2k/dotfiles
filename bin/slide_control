@@ -1,0 +1,27 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  slide_control
+# 
+#         USAGE:  ./slide_control 
+# 
+#   DESCRIPTION:  Move the Google slides window back and forth
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  05/02/2023 10:39:53 AM CDT
+#      REVISION:  ---
+#===============================================================================
+
+case $1 in
+    l) key=Left;;
+    r) key=Right;;
+    m) key=Ctrl+F5;;
+esac
+
+xdotool search --class brave-browser windowactivate --sync key $key

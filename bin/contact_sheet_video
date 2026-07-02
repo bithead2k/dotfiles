@@ -1,0 +1,37 @@
+#!/bin/bash
+outfile=$1
+cols=4
+cat <<EOF>$outfile
+<HTML>
+<HEAD>
+<TITLE>$(date '+%Y-%m-%d')</TITLE>
+</HEAD>
+<BODY>
+<CENTER><H1>$(date '+%Y-%m-%d')</H1></CENTER>
+<TABLE>
+EOF
+col=1
+for img in *.JPG
+do
+	[[ $col -eq 1 ]] && echo "<TR>" >> $outfile
+	caption=$(exiftool -Caption "$img" | sed -e 's/.*: //')
+	[[ $caption == '' ]] && caption=${img//.JPG/}  #no caption in exif tag, use the image name
+	echo "<TD><a href=\"${img//JPG/MOV}\"><img src=\"$img\"/><br/><center>$caption</center></a></TD>" >> $outfile
+
+	[[ $col -eq $cols ]] && {
+		echo "</TR>" >> $outfile
+		col=0
+		}
+	(( col++ ))
+done
+[[ $col -eq 1 ]] ||
+for ((i=$col;i<=$cols;i++))
+do
+	echo "<TD></TD>" >> $outfile
+	[[ $i -eq $cols ]] && echo "</TR>" >> $outfile
+done
+cat <<EOF>>$outfile
+</TABLE>
+</BODY>
+</HTML>
+EOF

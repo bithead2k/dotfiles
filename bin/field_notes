@@ -1,0 +1,41 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  field_notes
+# 
+#         USAGE:  ./field_notes 
+# 
+#   DESCRIPTION:  Get the field notes for any given day, default today
+# 
+#       OPTIONS:  ---
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  02/04/2023 05:38:13 AM CST
+#      REVISION:  ---
+#===============================================================================
+# set -x
+
+notesdir=~/Documents/notes/journals/
+
+thedate="$@"
+[[ $thedate == "" ]] && thedate=$(date +"%F")
+thefile=$(date --date="$thedate" +"%F")
+thefile="${thefile//-/_}.md"
+lasthr=$(cat ${notesdir}${thefile} | grep -n "<hr" | sed 's/:.*$//' | tail -n 1)
+[[ $lasthr -gt 0 ]] && {
+    sed "1,${lasthr}d" ${notesdir}${thefile} 
+    exit
+}
+# If there aren't any horizontal rules, start with the first section header
+lasthr=$(cat ${notesdir}${thefile} | grep -n "^[[:space:]]*# " | sed 's/:.*$//' | head -n 1)
+[[ $lasthr -gt 0 ]] && {
+    (( lasthr-- ))
+    sed "1,${lasthr}d" ${notesdir}${thefile} 
+    exit
+}
+# can't find shit.  just cat the file
+cat ${notesdir}${thefile}

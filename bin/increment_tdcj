@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE='https://inmate.tdcj.texas.gov/InmateSearch/search.action'
+
+function extract_tdcj_sid() {
+python3 -c '
+import sys, re
+
+s = sys.stdin.read()
+m = re.search(r"viewDetail\.action\?sid=([0-9]+)", s, re.I)
+if not m:
+    sys.exit(1)
+
+print(m.group(1))
+'
+}
+
+function extract_tdcj_detail() {
+python3 -c '
+import sys, re, html, csv
+
+s = sys.stdin.read()
+
+def strip_tags(x):
+    x = re.sub(r"<br\s*/?>", "\n", x, flags=re.I)
+    x = re.sub(r"</(?:div|p|tr|td|th|h1|h2|h3)>", "\n", x, flags=re.I)
+    x = re.sub(r"<[^>]+>", " ", x)
+    x = html.unescape(x)
+    x = re.sub(r"[ \t\r\f\v]+", " ", x)
+    x = re.sub(r"\n\s*", "\n", x)
+    return x.strip()
+
+t = strip_tags(s)
+
+labels = [
+    "SID Number",
+    "TDCJ Number",
+    "Name",
+    "Race",
+    "Gender",
+    "Age",
+    "Maximum Sentence Date",
+    "Current Facility",
+    "Projected Release Date",
+    "Parole Eligibility Date",
+    "Inmate Visitation Eligible",
+]
+
+def field(label):
+    pattern = (
+        re.escape(label) +
+        r":\s*(.*?)\s*(?=" +
+        "|".join(re.escape(x) + r":" for x in labels if x != label) +
+        r"|SPECIAL INFORMATION|Parole Review Information|Offense History|Return to Search Results|$)"
+    )
+    m = re.search(pattern, t, re.S | re.I)
+    return re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+
+sid_number              = field("SID Number")
+tdcj_number             = field("TDCJ Number")
+inmate_name             = field("Name")
+race                    = field("Race")
+gender                  = field("Gender")
+current_age             = field("Age")
+maximum_sentence_date   = field("Maximum Sentence Date")
+current_facility        = field("Current Facility")
+projected_release       = field("Projected Release Date")
+parole_eligibility_date = field("Parole Eligibility Date")
+
+# Keep only offense section.
+offense_section = ""
+m = re.search(
+    r"Offense History:\s*Offense Date\s+Offense\s+Sentence Date\s+County\s+Case No\.\s+Sentence \(YY-MM-DD\)\s*(.*?)(?:Return to Search Results|$)",
+    t,
+    re.S | re.I
+)
+if m:
+    offense_section = re.sub(r"\s+", " ", m.group(1)).strip()
+
+# Match each offense row.
+offense_re = re.compile(
+    r"(\d{4}-\d{2}-\d{2})\s+"          # offense_date
+    r"(.+?)\s+"                        # offense
+    r"(\d{4}-\d{2}-\d{2})\s+"          # sentence_date
+    r"([A-Z][A-Z ]+?)\s+"              # county
+    r"([A-Za-z0-9,./ -]+?)\s+"         # case_number
+    r"(\d+-\d{2}-\d{2}|Life|Capital Life)", # sentence
+    re.I
+)
+
+rows = list(offense_re.findall(offense_section))
+
+writer = csv.writer(sys.stdout)
+
+if not rows:
+    writer.writerow([
+        sid_number, tdcj_number, inmate_name, current_facility, gender, race,
+        current_age, projected_release, maximum_sentence_date, parole_eligibility_date,
+        "", "", "", "", "", "", "", "", "", ""
+    ])
+else:
+    for offense_date, offense, sentence_date, county, case_number, sentence_years in rows:
+        writer.writerow([
+            sid_number,
+            tdcj_number,
+            inmate_name,
+            current_facility,
+            gender,
+            race,
+            current_age,
+            projected_release,
+            maximum_sentence_date,
+            parole_eligibility_date,
+            case_number.strip(),
+            county.strip(),
+            "",                 # offense_code unavailable from detail page
+            offense.strip(),
+            sentence_date,
+            offense_date,
+            sentence_years,
+            "",                 # last_parole_decision not present in this page sample
+            "",                 # next_parole_review_date not present in this page sample
+            ""                  # parole_review_status not present in this page sample
+        ])
+'
+}
+
+function extract_tdcj_result() {
+python3 -c '
+import sys
+import html
+import re
+import csv
+
+s = sys.stdin.read()
+
+sid_match = re.search(
+    r"viewDetail\.action\?sid=([0-9]+)",
+    s,
+    re.I
+)
+
+sid = sid_match.group(1) if sid_match else ""
+
+row = re.search(
+    r"<tbody>.*?<tr[^>]*>(.*?)</tr>.*?</tbody>",
+    s,
+    re.S | re.I
+)
+
+if not row:
+    sys.exit(1)
+
+cells = re.findall(
+    r"<(?:td|th)[^>]*>(.*?)</(?:td|th)>",
+    row.group(1),
+    re.S | re.I
+)
+
+def clean(x):
+    x = re.sub(r"<[^>]+>", "", x)
+    x = html.unescape(x)
+    x = re.sub(r"\s+", " ", x).strip()
+    return x
+
+vals = [clean(c) for c in cells]
+
+csv.writer(sys.stdout).writerow([sid] + vals)
+'
+}
+
+last_tdcj=$(
+  psql -p 5432 -Atc '
+    SELECT max(tdcj_number::bigint) + 1
+    FROM kroybal.tdcj_ingestion
+    WHERE tdcj_number ~ $a$^[0-9]+$$a$; '
+)
+
+(( end=last_tdcj+20000 ))
+start="${1:-$last_tdcj}"
+end="${2:-$end}"
+
+fail_counter=0
+for ((i=start; i<=end; i++))
+do
+    n="$(printf '%08d' "$i")"
+    printf 'checking %s\n' "$n" >&2
+    html="$(
+      curl -sS -L "$BASE" \
+        -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data-urlencode 'page=index' \
+        --data-urlencode 'lastName=' \
+        --data-urlencode 'firstName=' \
+        --data-urlencode "tdcj=$n" \
+        --data-urlencode 'sid=' \
+        --data-urlencode 'gender=ALL' \
+        --data-urlencode 'race=ALL' \
+        --data-urlencode 'btnSearch=Search'
+    )"
+
+
+    if grep -qi 'viewDetail.action' <<<"$html"
+    then
+
+        fail_counter=0
+        sid="$(extract_tdcj_sid <<<"$html")"
+
+        detail="$(
+         curl -sS -L \
+            "https://inmate.tdcj.texas.gov/InmateSearch/viewDetail.action?sid=$sid"
+       )"
+
+       extract_tdcj_detail <<<"$detail" | psql -qp 5432 -v ON_ERROR_STOP=1 -c '\copy kroybal.tdcj_ingestion (
+sid_number, tdcj_number, inmate_name, current_facility, gender, race,
+current_age, projected_release, maximum_sentence_date, parole_eligibility_date,
+case_number, county, offense_code, tdcj_offense, sentence_date, offense_date,
+sentence_years, last_parole_decision, next_parole_review_date, parole_review_status
+) FROM STDIN WITH (FORMAT csv)' >/dev/null 2>&1 || true
+    else
+        # If we increment 10 times,
+        #  and don't find a record,
+        #  we're probably done.
+        (( ++fail_counter ))
+        if [ $fail_counter -gt 20 ]
+        then
+           exit  
+        fi
+    fi
+
+    sleep 2
+done
+

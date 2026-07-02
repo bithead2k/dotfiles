@@ -1,0 +1,50 @@
+#!/bin/bash
+#===============================================================================
+#
+#          FILE:  metricbeats
+# 
+#         USAGE:  ./metricbeats 
+# 
+#   DESCRIPTION:  turn metricbeats on and off
+# 
+#       OPTIONS:  None.  Toggle on and off.
+#  REQUIREMENTS:  ---
+#          BUGS:  ---
+#         NOTES:  ---
+#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
+#       COMPANY:  Timescale
+#       VERSION:  1.0
+#       CREATED:  10/24/2022 06:37:54 AM CDT
+#      REVISION:  ---
+#===============================================================================
+function turniton()
+{
+    # turn on redis
+    sudo cp ./project-file-redis.yml /etc/metricbeat/modules.d/redis.yml
+    # turn on metricbeats
+    sudo systemctl start metricbeat
+    # turn on the collector from redis to postgresql
+    perl hyprid-poller.pl --dbname metrics_ht --dbuser metrics_user --dbpass notasecurepassword >/dev/null 2>&1 &
+    exit
+}
+
+function turnitoff()
+{
+    # turn off the metricbeats to redis poller
+    sudo rm /etc/metricbeat/modules.d/redis.yml
+    # turn off metricbeats
+    sudo systemctl stop metricbeat
+    # kill the stats collector
+    sudo pkill hybrid-poller.pl
+    exit
+}
+
+function isitrunning()
+{
+    [[ -f /etc/metricbeat/modules.d/redis.yml ]] 
+}
+
+pushd ~/work/ts/project-metricbeat-to-postgresql-with-perl >/dev/null 2>&1
+isitrunning && echo "turning it off" && turnitoff
+echo "turning it on" && turniton
+

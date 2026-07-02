@@ -1,0 +1,2062 @@
+#!/usr/bin/env python3
+# parse_bv: Brave DevTools + surgical Obsidian BeenVerified importer
+# Baseline: build /rf/search/v2 URL and Page.navigate existing BeenVerified tab; no form fill.
+import base64
+import json
+import mimetypes
+import os
+import select
+import socket
+import hashlib
+import secrets
+import struct
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import date
+from html import unescape
+from pathlib import Path
+
+
+CDP_BASE = os.environ.get("PARSE_BV_CDP_BASE", "http://127.0.0.1:9222").rstrip("/")
+DASHBOARD_URL = os.environ.get("PARSE_BV_DASHBOARD", "https://www.beenverified.com/rf/dashboard")
+VAULT = Path(os.environ.get("VAULT") or os.environ.get("Obsidian") or str(Path.home() / "Documents/notes"))
+PEOPLE_DIR = VAULT / "people"
+ASSETS_DIR = PEOPLE_DIR / "assets"
+TEMPLATE = VAULT / "templates" / "New Person.md"
+SOURCE_TAG = "beenverified"
+TEMPLATE_ONLY_TAGS = {"🐘😇People", "DRW"}
+BACKGROUND_HEADING = "# Backgroud"  # Keep user's spelling.
+DEBUG_DIR = Path(os.environ.get("PARSE_BV_DEBUG_DIR", "/tmp/parse_bv"))
+KEEP_TAB = os.environ.get("PARSE_BV_KEEP_TAB", "") == "1"
+
+
+def die(msg, code=1):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def http_json(url, method="GET"):
+    req = urllib.request.Request(url, method=method)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def http_text(url, method="GET"):
+    req = urllib.request.Request(url, method=method)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def ensure_cdp():
+    try:
+        http_json(f"{CDP_BASE}/json/version")
+    except Exception as e:
+        die(
+            "Brave DevTools is not reachable. Start Brave with remote debugging, for example:\n"
+            "  brave-browser --remote-debugging-port=9222 --user-data-dir=\"$HOME/.config/BraveSoftware/Brave-Browser\"\n"
+            f"DevTools endpoint tried: {CDP_BASE}\n{e}"
+        )
+
+
+class SimpleWebSocket:
+    """Minimal stdlib WebSocket client for Chrome DevTools Protocol.
+
+    This avoids external helpers such as websocat and Python websocket-client.
+    It supports the text frames CDP uses, plus ping/pong/close handling.
+    """
+
+    def __init__(self, ws_url):
+        parsed = urllib.parse.urlparse(ws_url)
+        if parsed.scheme != "ws":
+            raise RuntimeError(f"Only ws:// DevTools URLs are supported here, got: {ws_url}")
+        self.host = parsed.hostname or "127.0.0.1"
+        self.port = parsed.port or 80
+        self.path = parsed.path or "/"
+        if parsed.query:
+            self.path += "?" + parsed.query
+        self.sock = socket.create_connection((self.host, self.port), timeout=10)
+        self.sock.settimeout(None)
+        self._handshake()
+
+    def fileno(self):
+        return self.sock.fileno()
+
+    def _handshake(self):
+        key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+        req = (
+            f"GET {self.path} HTTP/1.1\r\n"
+            f"Host: {self.host}:{self.port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n"
+            "\r\n"
+        )
+        self.sock.sendall(req.encode("ascii"))
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                raise RuntimeError("DevTools WebSocket closed during handshake")
+            data += chunk
+        header = data.decode("iso-8859-1", "replace")
+        if " 101 " not in header.split("\r\n", 1)[0]:
+            raise RuntimeError(f"DevTools WebSocket handshake failed: {header.splitlines()[0] if header else '<empty>'}")
+        accept = None
+        for line in header.split("\r\n"):
+            if line.lower().startswith("sec-websocket-accept:"):
+                accept = line.split(":", 1)[1].strip()
+                break
+        expected = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()).decode("ascii")
+        if accept != expected:
+            raise RuntimeError("DevTools WebSocket accept key mismatch")
+
+    def send_text(self, text):
+        payload = text.encode("utf-8")
+        mask = secrets.token_bytes(4)
+        first = 0x81  # FIN + text
+        n = len(payload)
+        if n < 126:
+            header = struct.pack("!BB", first, 0x80 | n)
+        elif n < 65536:
+            header = struct.pack("!BBH", first, 0x80 | 126, n)
+        else:
+            header = struct.pack("!BBQ", first, 0x80 | 127, n)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(header + mask + masked)
+
+    def _recv_exact(self, n):
+        out = b""
+        while len(out) < n:
+            chunk = self.sock.recv(n - len(out))
+            if not chunk:
+                raise RuntimeError("DevTools WebSocket closed")
+            out += chunk
+        return out
+
+    def recv_text(self):
+        chunks = []
+        while True:
+            h = self._recv_exact(2)
+            b1, b2 = h[0], h[1]
+            fin = bool(b1 & 0x80)
+            opcode = b1 & 0x0F
+            masked = bool(b2 & 0x80)
+            length = b2 & 0x7F
+            if length == 126:
+                length = struct.unpack("!H", self._recv_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack("!Q", self._recv_exact(8))[0]
+            mask = self._recv_exact(4) if masked else b""
+            payload = self._recv_exact(length) if length else b""
+            if masked:
+                payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+            if opcode == 0x8:  # close
+                raise RuntimeError("DevTools WebSocket closed")
+            if opcode == 0x9:  # ping
+                self._send_control(0xA, payload)
+                continue
+            if opcode == 0xA:  # pong
+                continue
+            if opcode in (0x1, 0x0):  # text or continuation
+                chunks.append(payload)
+                if fin:
+                    return b"".join(chunks).decode("utf-8", "replace")
+            else:
+                continue
+
+    def _send_control(self, opcode, payload=b""):
+        mask = secrets.token_bytes(4)
+        first = 0x80 | opcode
+        n = len(payload)
+        header = struct.pack("!BB", first, 0x80 | n)
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(header + mask + masked)
+
+    def close(self):
+        try:
+            self._send_control(0x8, b"")
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+
+
+def build_search_url(full_name, city, state):
+    first, last = name_parts_from_full(full_name)
+    middle = ""
+    parts = full_name.split()
+    if len(parts) > 2:
+        first = parts[0]
+        middle = " ".join(parts[1:-1])
+        last = parts[-1]
+    params = [
+        ("age", ""),
+        ("city", city or ""),
+        ("fullname", full_name),
+        ("fname", first),
+        ("ln", last),
+        ("mn", middle),
+        ("state", state or ""),
+        ("title", ""),
+        ("company", ""),
+        ("industry", ""),
+        ("level", ""),
+        ("companySizeMin", "1"),
+        ("companSizeMax", "9"),
+        ("birthMonth", ""),
+        ("birthYear", ""),
+        ("deathMonth", ""),
+        ("deathYear", ""),
+        ("address", ""),
+        ("isDeceased", "false"),
+        ("location", ""),
+        ("country", ""),
+        ("relatives", "[]"),
+        ("advancedSearch", "true"),
+        ("eventType", "none"),
+        ("eventMonth", ""),
+        ("eventYear", ""),
+        ("source", "personSearch,familySearch,obituarySearch,birthIndexSearch,deathIndexSearch,marriageIndexSearch,censusSearch,contactSearch,courtCasesSearch,courtOpinionsSearch"),
+        ("page", "1"),
+    ]
+    return "https://www.beenverified.com/rf/search/v2?" + urllib.parse.urlencode(params)
+
+
+def choose_existing_bv_tab():
+    """Return a BeenVerified tab from the debug Brave session.
+
+    Returns (tab, created_by_this_run).  If no BeenVerified tab is already open,
+    start one through the DevTools HTTP endpoint.
+    """
+    ensure_cdp()
+
+    def find_tab():
+        tabs = http_json(f"{CDP_BASE}/json")
+        scored = []
+        for t in tabs:
+            if t.get("type") != "page" or not t.get("webSocketDebuggerUrl"):
+                continue
+            url = t.get("url", "")
+            title = t.get("title", "")
+            score = 0
+            if "beenverified.com" in url:
+                score += 100
+            if "/rf/search/" in url:
+                score += 40
+            if "/rf/report/" in url:
+                score += 30
+            if "/rf/dashboard" in url:
+                score += 20
+            if "BeenVerified" in title or "Search" in title:
+                score += 10
+            if score:
+                scored.append((score, t))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return scored[0][1] if scored else None
+
+    existing = find_tab()
+    if existing:
+        return existing, False
+
+    print(f"No existing BeenVerified tab found in Brave debug session.")
+    print(f"Opening BeenVerified dashboard tab: {DASHBOARD_URL}")
+
+    opened = None
+    try:
+        opened = http_json(f"{CDP_BASE}/json/new?{urllib.parse.quote(DASHBOARD_URL, safe='')}", method="PUT")
+    except Exception:
+        try:
+            opened = http_json(f"{CDP_BASE}/json/new?{urllib.parse.quote(DASHBOARD_URL, safe='')}", method="GET")
+        except Exception as e:
+            die(f"Could not create a BeenVerified tab through Brave DevTools: {e}")
+
+    for _ in range(20):
+        tab = find_tab()
+        if tab:
+            return tab, True
+        time.sleep(0.5)
+
+    if isinstance(opened, dict) and opened.get("webSocketDebuggerUrl"):
+        return opened, True
+
+    die("Started a BeenVerified tab, but could not find it in Brave DevTools.")
+
+
+class CDPTab:
+    def __init__(self, url):
+        self.tab, self.search_tab_created_by_this_run = choose_existing_bv_tab()
+        self.tab_id = self.tab.get("id")
+        ws_url = self.tab.get("webSocketDebuggerUrl")
+        if not ws_url:
+            die("Could not obtain Chrome DevTools websocket URL for existing BeenVerified tab")
+        self.ws = SimpleWebSocket(ws_url)
+        self.next_id = 1
+        self.call("Page.enable")
+        self.call("Runtime.enable")
+        try:
+            http_text(f"{CDP_BASE}/json/activate/{self.tab_id}")
+        except Exception:
+            pass
+        print(f"Using existing BeenVerified tab: {self.tab.get('title','')}")
+        print(f"Initial tab URL: {self.tab.get('url','')}")
+        print(f"Navigating tab to: {url}")
+        self.call("Page.navigate", {"url": url}, timeout=15)
+        self.search_tab_id = self.tab_id
+        self.opened_report_tab_ids = set()
+
+    def close(self):
+        # This script uses an existing logged-in tab.  Do not close it by default.
+        try:
+            self.ws.close()
+        except Exception:
+            pass
+
+    def switch_to_tab(self, tab):
+        """Retarget this CDP wrapper to a different Brave tab.
+
+        BeenVerified sometimes opens the selected report in a new tab instead
+        of navigating the search tab. Continuing to read from the original tab
+        causes a false timeout.
+        """
+        try:
+            self.ws.close()
+        except Exception:
+            pass
+        self.tab = tab
+        self.tab_id = tab.get("id")
+        ws_url = tab.get("webSocketDebuggerUrl")
+        if not ws_url:
+            raise RuntimeError("Target tab has no webSocketDebuggerUrl")
+        self.ws = SimpleWebSocket(ws_url)
+        self.next_id = 1
+        self.call("Page.enable")
+        self.call("Runtime.enable")
+        try:
+            http_text(f"{CDP_BASE}/json/activate/{self.tab_id}")
+        except Exception:
+            pass
+        print(f"Switched to BeenVerified report tab: {tab.get('title','')}")
+        print(f"Report tab URL: {tab.get('url','')}")
+        if self.tab_id:
+            self.opened_report_tab_ids.add(self.tab_id)
+
+    def close_tab_by_id(self, tab_id):
+        if not tab_id:
+            return
+        try:
+            http_text(f"{CDP_BASE}/json/close/{tab_id}")
+            print(f"Closed Brave tab: {tab_id}")
+        except Exception as e:
+            print(f"WARNING: could not close Brave tab {tab_id}: {e}", file=sys.stderr)
+
+
+    def call(self, method, params=None, wait=True, timeout=20):
+        msg_id = self.next_id
+        self.next_id += 1
+        self.ws.send_text(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
+        if not wait:
+            return None
+        deadline = time.time() + timeout
+        fd = self.ws.fileno()
+        while time.time() < deadline:
+            remaining = max(0.05, deadline - time.time())
+            ready, _, _ = select.select([fd], [], [], min(0.5, remaining))
+            if not ready:
+                continue
+            raw = self.ws.recv_text()
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            if msg.get("id") == msg_id:
+                if "error" in msg:
+                    raise RuntimeError(msg["error"])
+                return msg.get("result")
+        raise TimeoutError(f"Timed out waiting for CDP response to {method}")
+
+    def eval(self, expr, timeout=20):
+        result = self.call("Runtime.evaluate", {
+            "expression": expr,
+            "returnByValue": True,
+            "awaitPromise": True,
+        }, timeout=timeout)
+        return result.get("result", {}).get("value") if result else None
+
+    def safe_eval(self, expr, timeout=8, default=""):
+        try:
+            value = self.eval(expr, timeout=timeout)
+            return default if value is None else value
+        except Exception:
+            return default
+
+    def wait_ready(self, seconds=3):
+        # BV is a SPA; document.readyState is not a reliable "done" signal.
+        # Keep this deliberately short so parsing does not appear to hang.
+        time.sleep(seconds)
+        for _ in range(6):
+            state = self.safe_eval("document.readyState", timeout=2, default="")
+            if state in ("interactive", "complete"):
+                return
+            time.sleep(0.25)
+
+    def wait_for(self, expr, timeout=20, interval=0.5):
+        deadline = time.time() + timeout
+        last = None
+        while time.time() < deadline:
+            try:
+                last = self.eval(expr, timeout=5)
+                if last:
+                    return last
+            except Exception:
+                pass
+            time.sleep(interval)
+        return last
+
+    def scroll_page(self):
+        # Keep scrolling bounded.  The BV report page can be very tall/heavy.
+        # We only need rendered text for frontmatter/report notes; do not wait
+        # for every lazy section.
+        for y in (0, 900, 1800, 3200, 5200, 7600, 0):
+            self.safe_eval(f"window.scrollTo(0,{y}); true", timeout=2, default=True)
+            time.sleep(0.25)
+
+    def capture(self, label):
+        # InnerText-only capture.  The previous outerHTML capture can hang or
+        # timeout on large BV report pages.  For parsing the report summary and
+        # updating Obsidian, the rendered text is the useful artifact.
+        self.scroll_page()
+        inner = self.safe_eval("document.body ? document.body.innerText : ''", timeout=6, default="") or ""
+        content = "\n<!-- PARSE_BV_INNERTEXT -->\n" + inner
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        (DEBUG_DIR / f"{label}.txt").write_text(content, encoding="utf-8", errors="replace")
+        (DEBUG_DIR / f"{label}-innerText.txt").write_text(inner, encoding="utf-8", errors="replace")
+        return content
+
+def js_string(s):
+    return json.dumps(s)
+
+
+CLICK_ADVANCED_SEARCH = r"""
+(() => {
+  function norm(s){ return (s||'').replace(/\\s+/g,' ').trim(); }
+  const nodes = [...document.querySelectorAll('a,button,[role="button"]')];
+  const hit = nodes.find(el => norm(el.innerText || el.textContent) === 'Advanced Search');
+  if (!hit) return {ok:false, reason:'Advanced Search link not found', text: document.body ? document.body.innerText.slice(0,2000) : ''};
+  hit.click();
+  return {ok:true, href: hit.href || '', text: norm(hit.innerText || hit.textContent)};
+})()
+"""
+
+
+def name_parts_from_full(full_name):
+    parts = [p for p in full_name.split() if p]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return " ".join(parts[:-1]), parts[-1]
+
+
+def submit_search(tab, full_name, city, state):
+    first, last = name_parts_from_full(full_name)
+    # BeenVerified is a React/MUI app.  The static page source is only a shell;
+    # wait for rendered inputs and select them by tight field metadata first.
+    tab.wait_for("document.body && /Advanced Search|First Name|Last Name|City|State/i.test(document.body.innerText)", timeout=25)
+    js = f"""
+    (() => {{
+      const data = {{full:{js_string(full_name)}, first:{js_string(first)}, last:{js_string(last)}, city:{js_string(city)}, state:{js_string(state)}}};
+      const norm = s => (s||'').replace(/\\s+/g,' ').trim();
+      const lower = s => norm(s).toLowerCase();
+      const visible = el => !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      const controls = [...document.querySelectorAll('input, textarea, select, [contenteditable="true"], [role="combobox"]')].filter(visible);
+
+      function directMeta(el) {{
+        let bits = [
+          el.name, el.id, el.placeholder, el.getAttribute('aria-label'),
+          el.getAttribute('autocomplete'), el.getAttribute('data-testid'),
+          el.getAttribute('type')
+        ];
+        if (el.id && window.CSS && CSS.escape) {{
+          const lab = document.querySelector(`label[for="${{CSS.escape(el.id)}}"]`);
+          if (lab) bits.push(lab.innerText || lab.textContent);
+        }}
+        const labelledby = el.getAttribute('aria-labelledby');
+        if (labelledby) {{
+          for (const id of labelledby.split(/\\s+/)) {{
+            const lab = document.getElementById(id);
+            if (lab) bits.push(lab.innerText || lab.textContent);
+          }}
+        }}
+        return lower(bits.filter(Boolean).join(' '));
+      }}
+
+      function contextText(el) {{
+        let bits = [directMeta(el)];
+        let p = el.parentElement;
+        for (let i=0; p && i<3; i++, p=p.parentElement) bits.push(p.innerText || p.textContent);
+        return lower(bits.filter(Boolean).join(' '));
+      }}
+
+      function setValue(el, val) {{
+        if (!el || val == null) return false;
+        el.scrollIntoView({{block:'center', inline:'nearest'}});
+        el.focus();
+        if (el.tagName === 'SELECT') {{
+          const wanted = lower(val);
+          const opt = [...el.options].find(o => lower(o.value) === wanted || lower(o.textContent) === wanted || lower(o.textContent).startsWith(wanted));
+          if (opt) el.value = opt.value; else el.value = val;
+        }} else if (el.isContentEditable) {{
+          el.innerText = val;
+        }} else {{
+          const proto = Object.getPrototypeOf(el);
+          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (desc && desc.set) desc.set.call(el, val); else el.value = val;
+        }}
+        el.dispatchEvent(new Event('input', {{bubbles:true}}));
+        el.dispatchEvent(new Event('change', {{bubbles:true}}));
+        el.dispatchEvent(new KeyboardEvent('keyup', {{bubbles:true, key:'Enter'}}));
+        return true;
+      }}
+
+      let used = [];
+      function pick(role) {{
+        const specs = {{
+          first: [/\\bfirst\\b/, /first.?name/, /given/],
+          last:  [/\\blast\\b/, /last.?name/, /surname/, /family/],
+          city:  [/\\bcity\\b/],
+          state: [/\\bstate\\b/, /province/, /region/],
+          name:  [/full.?name/, /person.?name/, /^name$/, /name/]
+        }}[role];
+        // Direct metadata is trusted.  Parent text can contain every label in a
+        // MUI grid and caused "Last Name" to be mistaken for First Name.
+        let direct = controls.find(el => !used.includes(el) && specs.some(re => re.test(directMeta(el))));
+        if (direct) return direct;
+        let ctx = controls.find(el => !used.includes(el) && specs.some(re => re.test(contextText(el))));
+        return ctx || null;
+      }}
+      function use(role, val) {{
+        const el = pick(role);
+        if (el && val) {{ setValue(el, val); used.push(el); return {{ok:true, meta: directMeta(el), ctx: contextText(el).slice(0,160)}}; }}
+        return {{ok:false}};
+      }}
+
+      let did = {{}};
+      // Prefer explicit first/last fields.  If labels are unavailable, use the
+      // first two visible text inputs in DOM order as first and last.
+      let firstEl = pick('first');
+      if (firstEl) {{ setValue(firstEl, data.first); used.push(firstEl); did.first = {{ok:true, meta: directMeta(firstEl)}}; }}
+      let lastEl = pick('last');
+      if (lastEl) {{ setValue(lastEl, data.last); used.push(lastEl); did.last = {{ok:true, meta: directMeta(lastEl)}}; }}
+
+      if (!firstEl || !lastEl) {{
+        const textInputs = controls.filter(el => !used.includes(el) && ['INPUT','TEXTAREA'].includes(el.tagName) && !/hidden|submit|button|checkbox|radio/i.test(el.type||''));
+        if (!firstEl && textInputs[0]) {{ setValue(textInputs[0], data.first); used.push(textInputs[0]); did.firstFallback = {{ok:true, meta: directMeta(textInputs[0])}}; }}
+        if (!lastEl && textInputs[1]) {{ setValue(textInputs[1], data.last); used.push(textInputs[1]); did.lastFallback = {{ok:true, meta: directMeta(textInputs[1])}}; }}
+      }}
+
+      if (!did.first && !did.last) did.full = use('name', data.full);
+
+      // Fill state before city.  BeenVerified's MUI location controls can
+      // re-render/clear the city field when state is selected, so city must be
+      // the final location field populated immediately before Show Results.
+      did.state = use('state', data.state);
+
+      // If state is a MUI combobox without direct metadata, use the next
+      // remaining short text input/combobox before touching city.
+      if (!did.state.ok && data.state) {{
+        const candidates = controls.filter(el => !used.includes(el) && (el.getAttribute('role') === 'combobox' || el.tagName === 'INPUT' || el.tagName === 'SELECT'));
+        const st = candidates.find(el => /state|province|region/.test(contextText(el))) || candidates[0];
+        if (st) {{ setValue(st, data.state); used.push(st); did.stateFallback = {{ok:true, meta: directMeta(st), ctx: contextText(st).slice(0,160), valueAfterFill: norm(st.value || st.innerText || st.textContent || '')}}; }}
+      }}
+
+      // City is deliberately filled last, after state.  Re-pick the city field
+      // now rather than reusing a pre-state element handle, because state
+      // selection can replace the city input in React.
+      let cityEl = pick('city');
+      if (cityEl && data.city) {{
+        setValue(cityEl, data.city);
+        cityEl.dispatchEvent(new FocusEvent('blur', {{bubbles:true}}));
+        used.push(cityEl);
+        let currentCity = norm(cityEl.value || cityEl.innerText || cityEl.textContent || '');
+        if (!currentCity || !currentCity.toLowerCase().includes(norm(data.city).toLowerCase())) {{
+          setValue(cityEl, data.city);
+          cityEl.dispatchEvent(new FocusEvent('blur', {{bubbles:true}}));
+          currentCity = norm(cityEl.value || cityEl.innerText || cityEl.textContent || '');
+          did.cityRefillLast = true;
+        }}
+        did.city = {{ok:true, meta: directMeta(cityEl), ctx: contextText(cityEl).slice(0,160), valueAfterFillLast: currentCity, valueBeforeSubmit: currentCity}};
+      }} else {{
+        did.city = {{ok:false}};
+      }}
+
+      function clickElement(el) {{
+        if (!el) return false;
+        el.scrollIntoView({{block:'center', inline:'nearest'}});
+        el.focus && el.focus();
+        for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) {{
+          el.dispatchEvent(new MouseEvent(type, {{bubbles:true, cancelable:true, view:window}}));
+        }}
+        return true;
+      }}
+
+      const buttons = [...document.querySelectorAll('button,a,[role="button"]')].filter(visible);
+      const buttonText = el => norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+      const enabledButtons = buttons.filter(el => !el.disabled && el.getAttribute('aria-disabled') !== 'true');
+
+      // Advanced Search has both the dashboard-level "Search" control and the
+      // real form submit button.  Prefer the specific rendered "Show Results"
+      // button; clicking the generic "Search" label leaves the form sitting
+      // there filled out but unsubmitted.
+      const submit = enabledButtons.find(el => /^show results$/i.test(buttonText(el)))
+                 || enabledButtons.find(el => /show\\s+results/i.test(buttonText(el)))
+                 || enabledButtons.find(el => /^(search|submit|find|continue)$/i.test(buttonText(el)))
+                 || enabledButtons.find(el => /search|submit|find|continue/i.test(buttonText(el)));
+      if (submit) {{ clickElement(submit); did.clicked = buttonText(submit); }}
+      else {{
+        const form = document.querySelector('form');
+        if (form) {{ form.requestSubmit ? form.requestSubmit() : form.submit(); did.form = true; }}
+      }}
+      return {{ok:true, did, controls: controls.map(el => directMeta(el)).filter(Boolean), url: location.href, text: document.body ? document.body.innerText.slice(0,1000) : ''}};
+    }})()
+    """
+    return tab.eval(js, timeout=20)
+
+
+def extract_inner_text(blob):
+    marker = "<!-- PARSE_BV_INNERTEXT -->"
+    if marker in blob:
+        return blob.split(marker, 1)[1]
+    # fallback: strip tags crudely
+    return re.sub(r"<[^>]+>", "\n", unescape(blob))
+
+
+def visible_lines(text):
+    out = []
+    for line in unescape(text).splitlines():
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            out.append(line)
+    return out
+
+
+def slugify(value):
+    value = re.sub(r"[^A-Za-z0-9]+", "-", value.strip().lower()).strip("-")
+    return value or "unknown"
+
+
+def title_case_name(name):
+    return " ".join(part[:1].upper() + part[1:].lower() for part in name.split())
+
+
+
+def normalize_name_token(value):
+    value = re.sub(r"[^A-Za-z]", "", value or "").casefold()
+    # Very small spelling normalization for common Hispanic surname variants.
+    value = value.replace("z", "s") if value in {"vasquez", "vazquez"} else value
+    return value
+
+def name_tokens(value):
+    return [normalize_name_token(x) for x in re.findall(r"[A-Za-z]+", value or "") if normalize_name_token(x)]
+
+def name_match_quality(candidate_name, search_name):
+    cand = name_tokens(candidate_name)
+    want = name_tokens(search_name)
+    if not cand or not want:
+        return 0
+    want_first = want[0]
+    want_last = want[-1]
+    cand_first = cand[0]
+    cand_last = cand[-1]
+
+    first_match = want_first in cand
+    last_match = want_last in cand
+
+    if first_match and last_match:
+        return 3      # Jesus Humberto Vasquez, Jesus Vasquez
+    if cand_first == want_first:
+        return 2      # Jesus J Garcia: maybe useful, but weaker
+    if last_match:
+        return 1      # Gerardo Vasquez: same surname but not same person
+    return 0          # Olivia Ibarra / Justina Cortes: obvious negative
+
+def candidate_name_from_text(text, search_name):
+    lines = visible_lines(text or "")
+    if not lines:
+        return ""
+    want = name_tokens(search_name)
+    # Prefer a line containing at least first or last requested token.
+    best = ""
+    best_q = -1
+    for line in lines[:8]:
+        toks = name_tokens(line)
+        if not toks:
+            continue
+        q = sum(1 for t in want if t in toks)
+        # Penalize UI-only and long summary lines.
+        if len(line) > 80:
+            q -= 1
+        if q > best_q:
+            best_q = q
+            best = line
+    return best or lines[0]
+
+def compact_candidate_summary(text, *, max_lines=16):
+    """Return readable result-card lines, dropping obvious navigation noise."""
+    drop_exact = {
+        "search", "advanced search", "show results", "people", "phone", "property",
+        "email", "username", "vehicle", "menu", "my dashboard", "reports",
+        "more searches", "profile", "connect", "more", "view report"
+    }
+    out = []
+    for line in visible_lines(text or ""):
+        clean = re.sub(r"\s+", " ", line).strip()
+        if not clean:
+            continue
+        low = clean.casefold()
+        if low in drop_exact:
+            continue
+        if len(clean) > 220:
+            clean = clean[:217] + "..."
+        if clean not in out:
+            out.append(clean)
+        if len(out) >= max_lines:
+            break
+    return out
+
+
+def find_text_block_for_name(lines, candidate_name, *, window=16):
+    toks = [t for t in name_tokens(candidate_name) if t]
+    if not toks:
+        return ""
+    best_i = None
+    best_score = 0
+    for i, line in enumerate(lines):
+        ltoks = name_tokens(line)
+        score = sum(1 for t in toks if t in ltoks)
+        if score > best_score:
+            best_score = score
+            best_i = i
+    if best_i is None or best_score == 0:
+        return ""
+    block = lines[best_i:best_i+window]
+    return "\n".join(block)
+
+def first_last_key(value):
+    toks = name_tokens(value)
+    if len(toks) < 2:
+        return ""
+    return f"{toks[0]} {toks[-1]}"
+
+
+def aliases_match(data, wanted_name):
+    wanted_key = normalize_alias_key(wanted_name)
+    aliases = []
+    aliases.extend(split_alias_values(data.get("aliases", "")))
+    aliases.extend(split_alias_values(data.get("alias", "")))
+    return any(normalize_alias_key(alias) == wanted_key for alias in aliases)
+
+
+def page_name_matches_first_last(path, wanted_name):
+    wanted_key = first_last_key(wanted_name)
+    if not wanted_key:
+        return False
+    return first_last_key(path.stem) == wanted_key
+
+
+def frontmatter_name_matches_first_last(data, wanted_name):
+    wanted_key = first_last_key(wanted_name)
+    if not wanted_key:
+        return False
+    fm_name = " ".join(
+        yaml_scalar(data.get(k, ""))
+        for k in ("first_name", "middle_name", "last_name")
+        if yaml_scalar(data.get(k, ""))
+    )
+    if fm_name and first_last_key(fm_name) == wanted_key:
+        return True
+    return False
+
+
+def unique_person_match(matches, wanted):
+    uniq = []
+    seen = set()
+    for p in matches:
+        key = str(p)
+        if key not in seen:
+            uniq.append(p)
+            seen.add(key)
+    if len(uniq) == 1:
+        return uniq[0]
+    if len(uniq) > 1:
+        die(
+            "Person name matched multiple pages for "
+            f"{wanted}: " + ", ".join(str(x) for x in uniq)
+        )
+    return None
+
+
+def person_file_for(name):
+    PEOPLE_DIR.mkdir(parents=True, exist_ok=True)
+    wanted = title_case_name(name)
+    exact = PEOPLE_DIR / f"{wanted}.md"
+    if exact.exists():
+        return exact
+
+    # case-insensitive filename fallback
+    for p in PEOPLE_DIR.glob("*.md"):
+        if p.stem.casefold() == wanted.casefold():
+            return p
+
+    # Full-name alias fallback. This catches pages such as Calvin Wilson.md
+    # when they already list Calvin Eugene Wilson as an alias.
+    alias_matches = []
+    fm_first_last_matches = []
+    for p in PEOPLE_DIR.glob("*.md"):
+        try:
+            data, _order, _body = parse_frontmatter(
+                p.read_text(encoding="utf-8", errors="replace")
+            )
+        except Exception:
+            continue
+
+        if aliases_match(data, wanted):
+            alias_matches.append(p)
+
+        if frontmatter_name_matches_first_last(data, wanted):
+            fm_first_last_matches.append(p)
+
+    match = unique_person_match(alias_matches, wanted)
+    if match:
+        return match
+
+    # First/last filename fallback. This catches the common case where the
+    # canonical page is "First Last.md" and the search name includes a middle
+    # name. Ambiguous matches abort instead of creating/updating the wrong page.
+    filename_first_last_matches = [
+        p for p in PEOPLE_DIR.glob("*.md")
+        if page_name_matches_first_last(p, wanted)
+    ]
+    match = unique_person_match(filename_first_last_matches, wanted)
+    if match:
+        return match
+
+    # YAML first/last fallback. This lets frontmatter rescue pages whose file
+    # name is not exactly the person's display name.
+    match = unique_person_match(fm_first_last_matches, wanted)
+    if match:
+        return match
+
+    return exact
+
+
+def parse_frontmatter(text):
+    m = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
+    if not m:
+        return {}, [], text
+    fm_text = m.group(1)
+    body = text[m.end():]
+    data, order = {}, []
+    current_key = None
+    for raw in fm_text.splitlines():
+        if re.match(r"^\s*-\s+", raw) and current_key:
+            data.setdefault(current_key, [])
+            if not isinstance(data[current_key], list):
+                data[current_key] = [data[current_key]] if data[current_key] else []
+            data[current_key].append(raw.split("-", 1)[1].strip())
+            continue
+        if ":" not in raw:
+            continue
+        key, value = raw.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        current_key = key
+        if key not in order:
+            order.append(key)
+        data[key] = value
+    return data, order, body
+
+
+def yaml_scalar(v):
+    if v is None:
+        return ""
+    if isinstance(v, list):
+        return ", ".join(str(x).strip() for x in v if str(x).strip())
+    return str(v).strip()
+
+
+def render_frontmatter(data, order):
+    final_order = list(order)
+    for key in data:
+        if key not in final_order:
+            final_order.append(key)
+    lines = ["---"]
+    for key in final_order:
+        value = data.get(key, "")
+        if isinstance(value, list):
+            lines.append(f"{key}:")
+            for item in value:
+                lines.append(f"  - {item}")
+        else:
+            lines.append(f"{key}: {value}" if yaml_scalar(value) else f"{key}: ")
+    lines.append("---")
+    return "\n".join(lines) + "\n"
+
+
+def load_person_page(path):
+    if path.exists():
+        return parse_frontmatter(path.read_text(encoding="utf-8", errors="replace")) + (False,)
+    if TEMPLATE.exists():
+        data, order, body = parse_frontmatter(TEMPLATE.read_text(encoding="utf-8", errors="replace"))
+    else:
+        data, order, body = {}, [], "\n![|250]()\n\n```dataview\nTABLE WITHOUT ID file.name as \"full name\", title, phone, work_email\nFROM \"people\"\nWHERE file.name = this.file.name\n```\n"
+    return data, order, body, True
+
+
+def ensure_tag(existing, tag, *, is_new):
+    vals = []
+    if isinstance(existing, list):
+        vals = [yaml_scalar(x) for x in existing if yaml_scalar(x)]
+    elif yaml_scalar(existing):
+        vals = [v.strip() for v in re.split(r"[,;]", yaml_scalar(existing)) if v.strip()]
+    if is_new:
+        vals = [v for v in vals if v not in TEMPLATE_ONLY_TAGS]
+    if tag not in vals:
+        vals.append(tag)
+    if not vals:
+        return ""
+    return vals[0] if len(vals) == 1 else vals
+
+
+def split_alias_values(value):
+    """Normalize aliases from scalar/list YAML into a de-duplicated list."""
+    vals = []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[,;]", yaml_scalar(value))
+    for item in raw_items:
+        s = yaml_scalar(item).strip()
+        if not s:
+            continue
+        if s not in vals:
+            vals.append(s)
+    return vals
+
+
+def normalize_alias_key(value):
+    return re.sub(r"\s+", " ", yaml_scalar(value)).strip().casefold()
+
+
+def merge_aliases(existing, incoming, canonical_name=""):
+    canonical_key = normalize_alias_key(canonical_name)
+    vals = []
+    for alias in split_alias_values(existing) + split_alias_values(incoming):
+        if not alias:
+            continue
+        if canonical_key and normalize_alias_key(alias) == canonical_key:
+            continue
+        if alias not in vals:
+            vals.append(alias)
+    if not vals:
+        return ""
+    # Keep YAML compact if there is only one alias; render as list if multiple.
+    return vals[0] if len(vals) == 1 else vals
+
+
+def merge_frontmatter(old, incoming, *, is_new, canonical_name=""):
+    merged = dict(old)
+    if is_new:
+        merged.pop("tags", None)
+        # BV data should not inherit template company defaults.
+        merged.pop("company", None)
+    for key, value in incoming.items():
+        if key == "tags":
+            merged[key] = ensure_tag(merged.get(key, ""), yaml_scalar(value), is_new=is_new)
+            continue
+        if key == "aliases":
+            merged[key] = merge_aliases(merged.get(key, ""), value, canonical_name=canonical_name)
+            continue
+        value = yaml_scalar(value)
+        if not value:
+            continue
+        if is_new or not yaml_scalar(merged.get(key, "")):
+            merged[key] = value
+    merged["tags"] = ensure_tag(merged.get("tags", ""), SOURCE_TAG, is_new=is_new)
+    # Also clean any pre-existing alias equal to the page name even if this run
+    # did not discover new aliases.
+    if "aliases" in merged:
+        merged["aliases"] = merge_aliases("", merged.get("aliases", ""), canonical_name=canonical_name)
+    return merged
+
+
+def person_context_from_page(data):
+    return {
+        "street": yaml_scalar(data.get("street")),
+        "city": yaml_scalar(data.get("city")),
+        "state": yaml_scalar(data.get("state")),
+        "zip": yaml_scalar(data.get("zip")),
+        "phone": yaml_scalar(data.get("phone")),
+        "home_email": yaml_scalar(data.get("home_email")),
+        "work_email": yaml_scalar(data.get("work_email")),
+        "birthday": yaml_scalar(data.get("birthday")),
+        "title": yaml_scalar(data.get("title")),
+        "company": yaml_scalar(data.get("company")),
+    }
+
+
+def candidate_links_from_page(tab):
+    js = r"""
+    (() => {
+      const norm = s => (s||'').replace(/\s+/g,' ').trim();
+      function candidateCardText(a) {
+        const own = norm(a.innerText || a.textContent || a.getAttribute('aria-label') || '');
+        let best = own;
+        let p = a;
+        for (let depth=0; p && depth<8; depth++, p=p.parentElement) {
+          const t = norm(p.innerText || p.textContent || '');
+          if (!t) continue;
+          // A result card is usually between 80 and 1500 chars.  Avoid grabbing
+          // the whole dashboard/root; but keep enough address/age/relative text
+          // for manual selection.
+          if (t.length >= Math.max(own.length, 20) && t.length <= 1800) {
+            best = t;
+          }
+          if (/\b(View Report|Open Report|Potential|Age|Lives in|Known Addresses|Possible Relatives)\b/i.test(t) && t.length <= 2500) {
+            best = t;
+          }
+        }
+        return best;
+      }
+      return [...document.querySelectorAll('a')].map((a, i) => ({
+        i,
+        text: norm(a.innerText || a.textContent || ''),
+        href: a.href || '',
+        aria: a.getAttribute('aria-label') || '',
+        cardText: candidateCardText(a),
+        rect: (() => { const r=a.getBoundingClientRect(); return {x:r.x,y:r.y,w:r.width,h:r.height}; })()
+      })).filter(x => x.href || x.text).slice(0,400);
+    })()
+    """
+    return tab.eval(js, timeout=15) or []
+
+
+def looks_like_candidate_link(link, name):
+    text = (link.get("text") or link.get("aria") or "").strip()
+    href = link.get("href") or ""
+    if not href:
+        return False
+    if not re.search(r"beenverified\.com|/rf/", href):
+        return False
+    low = (text + " " + href).lower()
+    if re.search(r"dashboard|advanced-search|/search|terms|privacy|unsubscribe", low):
+        return False
+    # BV report links sometimes have weak/no text, so keep report/person links here.
+    # Obvious name negatives are removed later, once the candidate display name is parsed.
+    return bool(re.search(r"report|person|profile|contact|bvid=", low))
+
+
+def looks_like_result_name_line(line, search_name):
+    """A rendered BV result starts with a name line, then Born/Locations nearby.
+
+    This deliberately parses the rendered innerText sequentially.  Do not use
+    arbitrary report links inside a large DOM container, because relatives such
+    as Cynthia can also be report links inside the selected person's card.
+    """
+    clean = re.sub(r"\s+", " ", line or "").strip()
+    if not clean:
+        return False
+    if len(clean) > 90:
+        return False
+    low = clean.casefold()
+    if low in {"results for:", "locations", "relatives", "aliases", "born", "deceased"}:
+        return False
+    if low.startswith("+") or low == "-":
+        return False
+    return name_match_quality(clean, search_name) >= 2
+
+
+def candidate_blocks_from_rendered_text(blob, search_name):
+    lines = visible_lines(extract_inner_text(blob))
+    # Start after the rendered "Results for:" marker when present.  The next
+    # line is the query name, not a candidate card.
+    start = 0
+    for i, line in enumerate(lines):
+        if line.casefold() == "results for:":
+            start = i + 2
+            break
+
+    starts = []
+    for i in range(start, len(lines)):
+        line = lines[i]
+        if not looks_like_result_name_line(line, search_name):
+            continue
+        lookahead = lines[i+1:i+5]
+        # True result cards quickly enter Born/Deceased/Locations.  Alias rows
+        # may be names too, but generally do not have that structure immediately.
+        if any(x in {"Locations", "Deceased"} or x.startswith("Born ") for x in lookahead):
+            starts.append(i)
+
+    blocks = []
+    for n, i in enumerate(starts):
+        j = starts[n+1] if n + 1 < len(starts) else min(len(lines), i + 40)
+        block_lines = lines[i:j]
+        # Trim footer/filter spill if this is the last captured block.
+        stop_words = {"MORE SEARCHES", "SUPPORT", "COMPANY", "RESOURCES", "CONTACT US"}
+        trimmed = []
+        for line in block_lines:
+            if line in stop_words:
+                break
+            trimmed.append(line)
+        if trimmed:
+            blocks.append((i, trimmed))
+    return blocks
+
+
+def summarize_result_block(block_lines, *, max_lines=18):
+    out = []
+    for line in block_lines[1:]:
+        clean = re.sub(r"\s+", " ", line).strip()
+        if not clean:
+            continue
+        if len(clean) > 220:
+            clean = clean[:217] + "..."
+        if clean not in out:
+            out.append(clean)
+        if len(out) >= max_lines:
+            break
+    return out
+
+
+def extract_candidates(blob, links, name, ctx):
+    candidates = []
+    seen_keys = set()
+    for ordinal, (line_index, block_lines) in enumerate(candidate_blocks_from_rendered_text(blob, name), start=1):
+        cand_name = block_lines[0]
+        nq = name_match_quality(cand_name, name)
+        if nq == 0:
+            continue
+        raw_text = "\n".join(block_lines)
+        key = (cand_name, raw_text[:160])
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        candidates.append({
+            "name": cand_name,
+            "href": "",                 # resolved only after user chooses
+            "result_ordinal": ordinal,   # ordinal in rendered result list
+            "line_index": line_index,
+            "summary": "\n".join(summarize_result_block(block_lines, max_lines=18)),
+            "score": score_candidate(raw_text, ctx, candidate_name=cand_name, search_name=name),
+            "name_match": nq,
+            "raw_text": raw_text,
+        })
+
+    candidates.sort(key=lambda c: (c.get("name_match", 0), c.get("score", 0), -c.get("result_ordinal", 9999)), reverse=True)
+    return candidates[:12]
+
+
+def click_candidate_result(tab, candidate_name, result_ordinal=1):
+    """Click the selected rendered result row using trusted CDP mouse events.
+
+    The previous implementation found the correct visible heading, but used
+    JavaScript dispatchEvent()/element.click().  BeenVerified's React/MUI route
+    handler ignored that synthetic click.  This version uses Chrome DevTools
+    Input.dispatchMouseEvent at the actual viewport coordinates, which is much
+    closer to the manual click that works in the browser.
+    """
+    js = f"""
+    (() => {{
+      const target = {js_string(candidate_name)};
+      const targetOrdinal = {int(result_ordinal)};
+      const norm = s => (s||'').replace(/\\s+/g,' ').trim();
+      const visible = el => {{
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && st.visibility !== 'hidden' && st.display !== 'none';
+      }};
+      const badAncestor = el => !!el.closest('header,footer,nav,aside');
+      const looksLikeHeadingText = text => text === target;
+
+      const raw = [...document.querySelectorAll('a,button,[role="button"],h1,h2,h3,h4,p,span,div')]
+        .filter(visible)
+        .filter(el => !badAncestor(el))
+        .map(el => {{
+          const text = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '');
+          const r = el.getBoundingClientRect();
+          return {{el, text, y:r.top + window.scrollY, x:r.left + window.scrollX, vx:r.left, vy:r.top, w:r.width, h:r.height, len:text.length}};
+        }})
+        .filter(x => looksLikeHeadingText(x.text))
+        .sort((a,b) => (a.y-b.y) || (a.x-b.x) || (a.len-b.len));
+
+      const dedup = [];
+      for (const x of raw) {{
+        if (dedup.some(y => Math.abs(y.y - x.y) < 4 && Math.abs(y.x - x.x) < 80)) continue;
+        dedup.push(x);
+      }}
+
+      const chosen = dedup[Math.max(0, targetOrdinal-1)] || dedup[0] || null;
+      if (!chosen) return {{ok:false, reason:'selected candidate heading not found', target, matches: raw.slice(0,20).map(x => ({{text:x.text, y:x.y, x:x.x, len:x.len}}))}};
+
+      chosen.el.scrollIntoView({{block:'center', inline:'nearest'}});
+
+      const r = chosen.el.getBoundingClientRect();
+
+      // Use a point on the visible heading text itself.  Keep it inside the
+      // element.  These are viewport coordinates, suitable for CDP Input events.
+      const x = Math.round(r.left + Math.min(Math.max(10, r.width / 2), Math.max(10, r.width - 10)));
+      const y = Math.round(r.top + Math.min(Math.max(8, r.height / 2), Math.max(8, r.height - 8)));
+
+      const atPoint = document.elementFromPoint(x, y);
+      const atText = atPoint ? norm(atPoint.innerText || atPoint.textContent || atPoint.getAttribute('aria-label') || '') : '';
+
+      return {{
+        ok:true,
+        before: location.href,
+        target,
+        resultOrdinal: targetOrdinal,
+        clickPoint: {{x, y}},
+        headingText: chosen.text,
+        headingTag: chosen.el.tagName,
+        atPointTag: atPoint ? atPoint.tagName : '',
+        atPointText: atText.slice(0,500),
+        matches: dedup.slice(0,20).map(x => ({{text:x.text, y:x.y, x:x.x, len:x.len}}))
+      }};
+    }})()
+    """
+    info = tab.eval(js, timeout=15) or {"ok": False, "matches": []}
+    if not info.get("ok"):
+        return info
+
+    pt = info.get("clickPoint") or {}
+    x = pt.get("x")
+    y = pt.get("y")
+    if x is None or y is None:
+        info["ok"] = False
+        info["reason"] = "no click coordinates returned"
+        return info
+
+    try:
+        tab.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y}, timeout=5)
+        tab.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}, timeout=5)
+        tab.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}, timeout=5)
+        info["trustedClick"] = True
+    except Exception as e:
+        info["trustedClick"] = False
+        info["trustedClickError"] = str(e)
+
+    return info
+
+
+def current_url(tab):
+    return tab.safe_eval("location.href", timeout=5, default="") or ""
+
+
+def find_report_tab(exclude_tab_id=None):
+    """Find an open BeenVerified person-report tab in Brave DevTools."""
+    try:
+        tabs = http_json(f"{CDP_BASE}/json")
+    except Exception:
+        return None
+    candidates = []
+    for t in tabs:
+        if t.get("type") != "page" or not t.get("webSocketDebuggerUrl"):
+            continue
+        if exclude_tab_id and t.get("id") == exclude_tab_id:
+            continue
+        url = t.get("url", "")
+        title = t.get("title", "")
+        if "beenverified.com" not in url:
+            continue
+        score = 0
+        if "/rf/report/person" in url:
+            score += 100
+        if "/rf/report/" in url:
+            score += 20
+        if "Person Report" in title:
+            score += 10
+        if score:
+            candidates.append((score, t))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1] if candidates else None
+
+
+def wait_for_report_navigation(tab, previous_url="", timeout=30):
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        last = current_url(tab)
+        if "/rf/report/person" in last and last != previous_url:
+            return last
+        time.sleep(0.5)
+    return last
+
+
+def report_body_probe(tab, expected_name=""):
+    """Detect a rendered BeenVerified person report from document.body text.
+
+    This is intentionally independent of the URL because BeenVerified is a SPA
+    and URL/load-state checks can lag behind the rendered report.
+    """
+    js = f"""
+    (() => {{
+      const expected = {js_string(expected_name or '')}.toLowerCase();
+      const raw = document.body ? document.body.innerText : '';
+      const text = raw.replace(/\\s+/g, ' ').trim();
+      const low = text.toLowerCase();
+      const score =
+        (low.includes('person report') ? 5 : 0) +
+        (low.includes('date updated') ? 2 : 0) +
+        (low.includes('contact information') ? 2 : 0) +
+        (low.includes('possible address history') ? 2 : 0) +
+        (low.includes('possible relatives') ? 1 : 0) +
+        (expected && low.includes(expected) ? 3 : 0);
+      return {{
+        url: location.href,
+        title: document.title || '',
+        score,
+        looksReport: score >= 7,
+        hasPersonReport: low.includes('person report'),
+        hasExpectedName: expected ? low.includes(expected) : false,
+        firstLines: raw.split(/\\n+/).map(s => s.trim()).filter(Boolean).slice(0, 30)
+      }};
+    }})()
+    """
+    try:
+        return tab.eval(js, timeout=8) or {}
+    except Exception as e:
+        return {"looksReport": False, "error": str(e), "url": current_url(tab)}
+
+
+def wait_for_report_page(tab, previous_url="", expected_name="", timeout=45):
+    """Wait for a report in the current tab or a newly opened BV tab.
+
+    BV often opens the selected report in another tab.  If that happens, switch
+    this CDP wrapper to the report tab and parse that tab.
+    """
+    deadline = time.time() + timeout
+    last_url = ""
+    last_probe = {}
+    original_tab_id = getattr(tab, "tab_id", None)
+
+    while time.time() < deadline:
+        last_url = current_url(tab)
+        last_probe = report_body_probe(tab, expected_name)
+
+        if "/rf/report/person" in last_url and last_url != previous_url:
+            return last_url, last_probe
+        if last_probe.get("looksReport"):
+            return last_url, last_probe
+
+        report_tab = find_report_tab(exclude_tab_id=original_tab_id)
+        if report_tab:
+            tab.switch_to_tab(report_tab)
+            last_url = current_url(tab)
+            last_probe = report_body_probe(tab, expected_name)
+            if "/rf/report/person" in last_url or last_probe.get("looksReport"):
+                return last_url, last_probe
+
+        time.sleep(0.5)
+
+    return last_url, last_probe
+
+def report_detail_probe(tab):
+    """Check whether the rendered report contains actual detail sections.
+
+    Person Report alone is not enough; BV may show the report header before
+    Contact Information / Address History / Relatives finish rendering.
+    """
+    js = r"""
+    (() => {
+      const raw = document.body ? document.body.innerText : '';
+      const low = raw.toLowerCase();
+      const hits = [];
+      for (const phrase of [
+        'contact information',
+        'possible phone numbers',
+        'possible email addresses',
+        'possible address history',
+        'possible relatives',
+        'possible associates',
+        'possible neighbors',
+        'additional information'
+      ]) {
+        if (low.includes(phrase)) hits.push(phrase);
+      }
+      return {
+        url: location.href,
+        title: document.title || '',
+        textLength: raw.length,
+        hits,
+        ready: hits.length >= 2 || (low.includes('contact information') && raw.length > 1500),
+        firstLines: raw.split(/\n+/).map(s => s.trim()).filter(Boolean).slice(0, 40)
+      };
+    })()
+    """
+    try:
+        return tab.eval(js, timeout=8) or {}
+    except Exception as e:
+        return {"ready": False, "error": str(e), "url": current_url(tab)}
+
+
+def wait_for_report_details(tab, timeout=60):
+    """Wait for real report sections, not just the header."""
+    deadline = time.time() + timeout
+    last = {}
+    while time.time() < deadline:
+        last = report_detail_probe(tab)
+        if last.get("ready"):
+            return last
+        time.sleep(1)
+    return last
+
+
+def score_candidate(text, ctx, *, candidate_name="", search_name=""):
+    low = text.casefold()
+    score = 0
+    nq = name_match_quality(candidate_name or text, search_name) if search_name else 0
+    if nq == 3:
+        score += 40
+    elif nq == 2:
+        score += 15
+    elif nq == 1:
+        score += 5
+    for key, weight in [("city", 5), ("state", 4), ("zip", 5), ("street", 7), ("phone", 5), ("home_email", 4), ("work_email", 4)]:
+        val = yaml_scalar(ctx.get(key))
+        if val and val.casefold() in low:
+            score += weight
+    return score
+
+
+def choose_candidate(candidates):
+    if not candidates:
+        die("No likely BeenVerified candidates found. Debug page saved under /tmp/parse_bv/.")
+    print("\nLikely BeenVerified candidates:\n")
+    for idx, c in enumerate(candidates, start=1):
+        print(f"[{idx}] score={c.get('score',0)} name_match={c.get('name_match',0)}")
+        print(f"    {c.get('name','')}")
+        if c.get("summary") and c.get("summary") != c.get("name"):
+            print("    summary:")
+            for line in str(c["summary"]).splitlines():
+                if line.strip() and line.strip() != c.get("name", "").strip():
+                    print(f"      - {line.strip()}")
+        if c.get("result_ordinal"):
+            print(f"    rendered result ordinal: {c['result_ordinal']}")
+        if c.get("href"):
+            print(f"    link: {c['href']}")
+        print()
+    while True:
+        ans = input("Pick candidate number, paste report URL, or q to quit: ").strip()
+        if ans.lower() in {"q", "quit", "exit"}:
+            sys.exit(0)
+        if re.match(r"^https?://(?:www\.)?beenverified\.com/rf/report/person\?", ans):
+            return {
+                "name": "<manual report URL>",
+                "href": ans,
+                "manual_href": True,
+                "score": 0,
+                "name_match": 0,
+                "summary": "manual report URL supplied at prompt",
+            }
+        if re.match(r"^/rf/report/person\?", ans):
+            return {
+                "name": "<manual report URL>",
+                "href": urllib.parse.urljoin("https://www.beenverified.com", ans),
+                "manual_href": True,
+                "score": 0,
+                "name_match": 0,
+                "summary": "manual report URL supplied at prompt",
+            }
+        if ans.isdigit() and 1 <= int(ans) <= len(candidates):
+            return candidates[int(ans)-1]
+        print("Enter a candidate number, a BeenVerified /rf/report/person URL, or q.")
+
+
+def parse_detail_fields(blob):
+    text = extract_inner_text(blob)
+    lines = visible_lines(text)
+    fields = {}
+
+    # Focus only the actual report body.  Strip all top navigation/search chaff.
+    report_lines = clean_report_lines(lines)
+    joined = "\n".join(report_lines)
+
+    subject = extract_report_subject(report_lines)
+    if subject:
+        name_parts = subject.get("name_parts", {})
+        if name_parts.get("first_name"):
+            fields.setdefault("first_name", name_parts["first_name"])
+        if name_parts.get("middle_name"):
+            fields.setdefault("middle_name", name_parts["middle_name"])
+        if name_parts.get("last_name"):
+            fields.setdefault("last_name", name_parts["last_name"])
+        if subject.get("birthday"):
+            fields.setdefault("birthday", subject["birthday"])
+        if subject.get("aliases"):
+            fields.setdefault("aliases", subject["aliases"])
+
+    email_match = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", joined)
+    phone_match = re.search(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}", joined)
+    if email_match:
+        fields["home_email"] = email_match.group(0)
+    if phone_match:
+        fields["phone"] = phone_match.group(0)
+
+    # Address: BV detail pages commonly include:
+    #   Location: 2401 Kingsbridge St, Grand Prairie, TX, 75050
+    mloc = re.search(
+        r"\bLocation:\s*(\d{1,6}\s+[^,\n]+),\s*([^,\n]+),\s*([A-Z]{2}),?\s*(\d{5}(?:-\d{4})?)?",
+        joined,
+        re.I,
+    )
+    if mloc:
+        fields.setdefault("street", normalize_street(mloc.group(1).strip()))
+        fields.setdefault("city", mloc.group(2).strip())
+        fields.setdefault("state", mloc.group(3).strip().upper())
+        if mloc.group(4):
+            fields.setdefault("zip", mloc.group(4).strip())
+        fields.setdefault("country", "USA")
+    else:
+        for i, line in enumerate(report_lines[:-1]):
+            if is_street_line(line):
+                nxt = report_lines[i+1]
+                m = re.search(r"^([^,]+),\s*([A-Z]{2}),?\s*(\d{5}(?:-\d{4})?)?", nxt)
+                if m:
+                    fields.setdefault("street", normalize_street(line.rstrip(",")))
+                    fields.setdefault("city", m.group(1).strip())
+                    fields.setdefault("state", m.group(2).strip())
+                    if m.group(3):
+                        fields.setdefault("zip", m.group(3).strip())
+                    fields.setdefault("country", "USA")
+                    break
+
+    return fields, report_lines
+
+
+MONTHS = {
+    "jan": "01", "january": "01",
+    "feb": "02", "february": "02",
+    "mar": "03", "march": "03",
+    "apr": "04", "april": "04",
+    "may": "05",
+    "jun": "06", "june": "06",
+    "jul": "07", "july": "07",
+    "aug": "08", "august": "08",
+    "sep": "09", "sept": "09", "september": "09",
+    "oct": "10", "october": "10",
+    "nov": "11", "november": "11",
+    "dec": "12", "december": "12",
+}
+
+
+def normalize_street(s):
+    # Do not corrupt full words.  Only expand a missing terminal suffix when BV
+    # has split/shortened the location line.
+    s = re.sub(r"\s+", " ", s).strip().rstrip(",")
+    return s
+
+
+def is_street_line(line):
+    return bool(re.search(r"\b\d{1,6}\s+.+\b(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Ct|Court|Blvd|Way|Pl|Place|Cir|Circle)\b", line, re.I))
+
+
+def parse_month_year(mon, year):
+    mm = MONTHS.get(mon.strip().lower().rstrip("."))
+    if not mm:
+        return ""
+    # We only have month/year, so store YYYY-MM rather than inventing a day.
+    return f"{year}-{mm}"
+
+
+def split_person_name(full):
+    parts = [p for p in re.split(r"\s+", full.strip()) if p]
+    if not parts:
+        return {}
+    out = {"first_name": parts[0]}
+    if len(parts) == 2:
+        out["last_name"] = parts[1]
+    elif len(parts) > 2:
+        out["middle_name"] = " ".join(parts[1:-1])
+        out["last_name"] = parts[-1]
+    return out
+
+
+def extract_report_subject(lines):
+    # Find the subject name from the "Person Report" header area.
+    idx = None
+    for i, line in enumerate(lines):
+        if line == "Person Report":
+            idx = i
+            break
+    if idx is None:
+        return {}
+
+    # Usually the actual subject appears immediately before and/or after
+    # "Person Report".  Prefer the line after Date Updated if present, then the
+    # line immediately before Person Report.
+    name = ""
+    for j in range(idx, min(len(lines), idx + 12)):
+        if re.match(r"^Date Updated:\s*", lines[j], re.I) and j + 1 < len(lines):
+            name = lines[j + 1].strip()
+            break
+    if not name and idx > 0:
+        name = lines[idx - 1].strip()
+
+    out = {"name": name, "name_parts": split_person_name(name)} if name else {}
+
+    for line in lines[idx:min(len(lines), idx + 30)]:
+        m = re.search(r"Age:\s*\d+\s*,\s*Born\s+([A-Za-z]+),?\s+(\d{4})", line, re.I)
+        if m:
+            out["birthday"] = parse_month_year(m.group(1), m.group(2))
+        m = re.search(r"Aliases:\s*(.+)$", line, re.I)
+        if m:
+            aliases = [a.strip() for a in m.group(1).split(",") if a.strip()]
+            if aliases:
+                out["aliases"] = ", ".join(aliases)
+    return out
+
+
+NAV_CHAFF = {
+    "Search by", "People", "Phone", "Property", "Email", "Username", "Vehicle",
+    "Deep Search", "Menu", "My Dashboard", "Reports", "More Searches", "New",
+    "Family & Ancestry", "Professional Tools", "Profile", "Contact Information",
+    "Associates", "Court Records", "Free", "Jobs & Education", "Assets",
+    "Next Steps", "Search", "Dashboard", "Loading", "Advanced Search", "Back",
+    "More", "View", "View Assets", "Add to Family Tree", "Usage:", "Info provided by",
+}
+
+TAIL_CHAFF_HEADINGS = {
+    "Possible Social Media",
+    "Possible Usernames",
+    "Names & Ancestry",
+    "Court Records",
+    "Possible Jobs",
+    "Possible Education",
+    "Licenses & Permits",
+    "Possible Owned Assets",
+    "Notes",
+    "Related Reports",
+    "How would you rate this report?",
+    "Empty",
+    "Try Another Search",
+    "MORE SEARCHES",
+    "RESOURCES",
+    "SUPPORT",
+    "COMPANY",
+    "STAY CONNECTED",
+    "CONTACT US",
+}
+
+
+def clean_report_lines(lines):
+    clean = []
+    # Start at actual report subject, not site nav.  We need the subject line
+    # before "Person Report", so include one line back.
+    start = 0
+    for i, line in enumerate(lines):
+        if line == "Person Report":
+            start = max(0, i - 1)
+            break
+
+    stop = len(lines)
+    for i in range(start, len(lines)):
+        if lines[i] in {"MORE SEARCHES", "Try Another Search"}:
+            stop = i
+            break
+
+    for line in lines[start:stop]:
+        if not line:
+            continue
+        if line in NAV_CHAFF:
+            continue
+        if line in TAIL_CHAFF_HEADINGS:
+            # Stop at name-history/social/etc chaff. Keep relatives/associates/
+            # address sections above this point.
+            break
+        if re.fullmatch(r"\d+", line):
+            continue
+        if line.startswith("WARNING:"):
+            continue
+        if line.startswith("By clicking Search"):
+            break
+        if len(line) > 240:
+            continue
+        clean.append(line)
+    return clean
+
+
+SECTION_HEADINGS = {
+    "Possible Phone Numbers": "## Possible Phone Numbers",
+    "Possible Email Addresses": "## Possible Email Addresses",
+    "Possible Address History": "## Possible Address History",
+    "Possible Relatives": "## Possible Relatives",
+    "Possible Associates": "## Possible Associates",
+    "Possible Neighbors": "## Possible Neighbors",
+}
+
+
+def fallback_report_lines(text):
+    """Last-resort bounded extract from rendered report text.
+
+    Used when strict cleanup accidentally strips everything.  Still removes
+    obvious site chrome/footer, but it does not require the exact section
+    grammar.
+    """
+    lines = visible_lines(text)
+    if not lines:
+        return []
+    start = 0
+    for i, line in enumerate(lines):
+        if line == "Person Report":
+            start = max(0, i - 1)
+            break
+    stop = len(lines)
+    for i in range(start, len(lines)):
+        if lines[i] in {"MORE SEARCHES", "Try Another Search", "How would you rate this report?"}:
+            stop = i
+            break
+
+    out = []
+    drop = set(NAV_CHAFF) | {
+        "Search by", "People", "Phone", "Property", "Email", "Username", "Vehicle",
+        "Deep Search", "Menu", "My Dashboard", "Reports", "More Searches",
+        "View", "View Assets", "Add to Family Tree", "Residential", "Mobile",
+    }
+    for line in lines[start:stop]:
+        if not line or line in drop:
+            continue
+        if re.fullmatch(r"\d+", line):
+            continue
+        if line.startswith("WARNING:"):
+            continue
+        if len(line) > 240:
+            continue
+        out.append(line)
+        if len(out) >= 180:
+            break
+    return out
+
+
+def detail_markdown(lines):
+    original_lines = list(lines or [])
+    lines = clean_report_lines(original_lines)
+    if not lines:
+        # Caller may already have supplied fallback lines that do not match the
+        # strict report-cleaning grammar.  Preserve them rather than dropping
+        # the whole report section.
+        fallback = [x for x in original_lines if x and len(x) <= 240]
+        if not fallback:
+            return ""
+        return "\n".join(f"- {x}" for x in fallback[:180]) + "\n"
+
+    out = []
+    in_section = None
+    skip_lines = {"Residential", "Owned Asset", "Mobile", "Aries"}
+
+    # Header block.
+    subject = extract_report_subject(lines)
+    if subject.get("name"):
+        out.append(f"## Summary")
+        out.append("")
+        out.append(f"- Name: {subject['name']}")
+        if subject.get("birthday"):
+            out.append(f"- Born: {subject['birthday']}")
+        # Pull location/aliases from early lines.
+        for line in lines[:25]:
+            if line.startswith("Age:"):
+                out.append(f"- {line}")
+            elif line.startswith("Location:"):
+                out.append(f"- {line}")
+            elif line.startswith("Aliases:"):
+                out.append(f"- {line}")
+        out.append("")
+
+    current_heading = None
+    for line in lines:
+        if line in {"Person Report"}:
+            continue
+        if subject.get("name") and line == subject["name"]:
+            continue
+        if line.startswith("Date Updated:"):
+            if not any(x.startswith("- Date Updated:") for x in out):
+                out.insert(2, f"- {line}")
+            continue
+        if line in SECTION_HEADINGS:
+            current_heading = SECTION_HEADINGS[line]
+            out.append(current_heading)
+            out.append("")
+            continue
+        if line in skip_lines:
+            continue
+        if line.startswith("No possible social media") or line.startswith("No possible username"):
+            continue
+        if line.startswith("No licenses") or line.startswith("No relevant licenses"):
+            continue
+        if line.startswith("No possible jobs") or line.startswith("No possible education"):
+            continue
+        if line == "Additional Information":
+            out.append("## Additional Information")
+            out.append("")
+            continue
+        if not current_heading and (
+            line.startswith("Age:") or line.startswith("Location:") or line.startswith("Aliases:")
+        ):
+            continue
+        # Keep report content as bullets under headings.
+        out.append(f"- {line}")
+
+    # Compact repeated blank lines.
+    md = "\n".join(out).strip() + "\n"
+    md = re.sub(r"\n{3,}", "\n\n", md)
+    return md
+
+def extract_pdf_links(blob):
+    links = []
+    html_part = blob.split("<!-- PARSE_BV_INNERTEXT -->", 1)[0]
+    for m in re.finditer(r"href=[\"']([^\"']+\.pdf(?:\?[^\"']*)?)[\"']", html_part, re.I):
+        links.append(unescape(m.group(1)))
+    for m in re.finditer(r"https?://[^\s\"'<>]+\.pdf(?:\?[^\s\"'<>]*)?", blob, re.I):
+        links.append(unescape(m.group(0)))
+    # Report links may not end in .pdf.
+    for m in re.finditer(r"href=[\"']([^\"']*(?:pdf|download|report)[^\"']*)[\"']", html_part, re.I):
+        href = unescape(m.group(1))
+        if href not in links:
+            links.append(href)
+    out = []
+    for href in links:
+        if href.startswith("/"):
+            href = urllib.parse.urljoin("https://www.beenverified.com", href)
+        if href not in out:
+            out.append(href)
+    return out
+
+
+def download_via_browser(tab, url, outpath):
+    # Use fetch inside logged-in browser context, preserving BV cookies/session.
+    js = f"""
+    (async () => {{
+      const resp = await fetch({js_string(url)}, {{credentials:'include'}});
+      if (!resp.ok) return {{ok:false, status:resp.status, statusText:resp.statusText}};
+      const buf = await resp.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buf);
+      const chunk = 0x8000;
+      for (let i=0; i<bytes.length; i+=chunk) {{
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+      }}
+      return {{ok:true, contentType: resp.headers.get('content-type') || '', b64: btoa(binary)}};
+    }})()
+    """
+    res = tab.eval(js, timeout=60) or {}
+    if not res.get("ok"):
+        raise RuntimeError(f"download failed: {res}")
+    data = base64.b64decode(res.get("b64", ""))
+    outpath.write_bytes(data)
+    return res.get("contentType", "")
+
+
+def append_or_replace_background(body, asset_rel):
+    section = f"{BACKGROUND_HEADING}\n\n![[{asset_rel}]]\n"
+    pattern = re.compile(rf"(?ms)^#\s+Backgrou?d\s*\n.*?(?=^#\s+|\Z)")
+    if pattern.search(body):
+        return pattern.sub(section.rstrip() + "\n\n", body, count=1)
+    if not body.endswith("\n"):
+        body += "\n"
+    return body + "\n" + section + "\n"
+
+
+def upsert_report_section(body, lines):
+    md = detail_markdown(lines)
+    if not md:
+        return body
+    heading = "# BeenVerified Details"
+    section = f"{heading}\n\n{md}\n"
+    pattern = re.compile(rf"(?ms)^#\s+BeenVerified Details\s*\n.*?(?=^#\s+|\Z)")
+    if pattern.search(body):
+        return pattern.sub(section.rstrip() + "\n\n", body, count=1)
+    if not body.endswith("\n"):
+        body += "\n"
+    return body + "\n" + section + "\n"
+
+
+def main():
+    if len(sys.argv) < 2:
+        die("Usage: parse_bv <person name...>")
+    name = " ".join(sys.argv[1:]).strip()
+    if not name:
+        die("No name supplied")
+
+    person_path = person_file_for(name)
+    data, order, body, is_new = load_person_page(person_path)
+    ctx = person_context_from_page(data)
+
+    city = ctx.get("city", "")
+    state = ctx.get("state", "")
+    print(f"Person page: {person_path}")
+    print(f"Search name: {name}")
+    print(f"Search location: {city}, {state}" if city or state else "Search location: <none from YAML>")
+
+    search_url = build_search_url(name, city, state)
+    print(f"Search URL: {search_url}")
+
+    tab = CDPTab(search_url)
+    try:
+        tab.wait_ready(4)
+        # Page.navigate on the existing logged-in tab is the reliable equivalent
+        # of manually pasting the URL into Brave.  Do not fill the React form.
+        print("Waiting for rendered results...")
+        for _ in range(30):
+            try:
+                txt = tab.eval("document.body ? document.body.innerText : ''", timeout=3) or ""
+                if re.search(r"View Report|Possible Relatives|Known Addresses|Age|Lives in|Results|We found|Showing", txt, re.I):
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        results_blob = tab.capture("bv-results")
+        links = candidate_links_from_page(tab)
+        candidates = extract_candidates(results_blob, links, name, ctx)
+        manual_report_url = os.environ.get("PARSE_BV_REPORT_URL", "").strip()
+        if manual_report_url:
+            href = manual_report_url
+            print(f"Using PARSE_BV_REPORT_URL: {href}")
+        else:
+            chosen = choose_candidate(candidates)
+            if chosen.get("manual_href"):
+                href = chosen.get("href")
+                print(f"Opening candidate URL supplied at prompt: {href}")
+                tab.call("Page.navigate", {"url": href})
+                tab.wait_ready(2)
+                wait_for_report_page(tab, "", "", timeout=30)
+                time.sleep(2)
+            else:
+                before_url = current_url(tab)
+                print(f"Clicking selected result row: {chosen.get('name','')} (rendered ordinal {chosen.get('result_ordinal', 1)})")
+                click_result = click_candidate_result(tab, chosen.get("name", ""), chosen.get("result_ordinal", 1))
+                if not click_result.get("ok"):
+                    print("WARNING: Could not click the selected result heading.", file=sys.stderr)
+                    print("Debug click result:", json.dumps(click_result, indent=2), file=sys.stderr)
+                    die("Could not click candidate result safely.")
+                href, report_probe = wait_for_report_page(tab, before_url, chosen.get("name", ""), timeout=45)
+                if "/rf/report/person" not in href and not report_probe.get("looksReport"):
+                    print("WARNING: Trusted row click did not reach a recognizable BeenVerified person report.", file=sys.stderr)
+                    print("Debug click result:", json.dumps(click_result, indent=2), file=sys.stderr)
+                    print("Report probe:", json.dumps(report_probe, indent=2), file=sys.stderr)
+                    print(f"Current URL after click: {href}", file=sys.stderr)
+                    die("Selected candidate click did not reach report page.")
+                print(f"Opened candidate/report page: {href}")
+                if report_probe.get("looksReport") and "/rf/report/person" not in href:
+                    print("NOTE: URL did not expose /rf/report/person, but rendered body is a valid Person Report.")
+                tab.wait_ready(2)
+                time.sleep(3)
+        if manual_report_url:
+            print(f"Opening candidate: {href}")
+            tab.call("Page.navigate", {"url": href})
+            tab.wait_ready(2)
+            wait_for_report_page(tab, "", "", timeout=30)
+            time.sleep(2)
+        print("Waiting for rendered report detail sections...")
+        detail_probe = wait_for_report_details(tab, timeout=int(os.environ.get("PARSE_BV_DETAIL_WAIT", "60")))
+        if not detail_probe.get("ready"):
+            DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+            (DEBUG_DIR / "detail-probe.json").write_text(json.dumps(detail_probe, indent=2), encoding="utf-8")
+            print("WARNING: report page opened, but expected detail sections did not finish rendering.", file=sys.stderr)
+            print(f"Debug probe: {DEBUG_DIR / 'detail-probe.json'}", file=sys.stderr)
+
+        print("Capturing rendered report details...")
+        detail_blob = tab.capture("bv-detail")
+        incoming, detail_lines = parse_detail_fields(detail_blob)
+        incoming["tags"] = SOURCE_TAG
+        incoming["date"] = date.today().isoformat()
+
+        # Do not silently report success if we reached a report page but cleaned
+        # parsing produced no usable detail section.  Fall back to a bounded raw
+        # report extract so the Obsidian page still gets the available data.
+        if not detail_markdown(detail_lines).strip():
+            raw_lines = fallback_report_lines(extract_inner_text(detail_blob))
+            if raw_lines:
+                print("WARNING: cleaned report parser produced no details; using fallback raw report extract.", file=sys.stderr)
+                detail_lines = raw_lines
+            else:
+                DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+                (DEBUG_DIR / "empty-detail-capture.txt").write_text(extract_inner_text(detail_blob), encoding="utf-8", errors="replace")
+                die(f"Report page opened, but no detail text was captured. See {DEBUG_DIR / 'empty-detail-capture.txt'}")
+
+        merged = merge_frontmatter(data, incoming, is_new=is_new, canonical_name=person_path.stem)
+        new_body = upsert_report_section(body, detail_lines)
+
+        if os.environ.get("PARSE_BV_TRY_PDF"):
+            print("Looking for downloadable PDF/report links...")
+            pdf_links = extract_pdf_links(detail_blob)
+            if pdf_links:
+                ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+                pdf_name = f"beenverified-{slugify(person_path.stem)}.pdf"
+                pdf_path = ASSETS_DIR / pdf_name
+                downloaded = False
+                for pdf_url in pdf_links:
+                    try:
+                        download_via_browser(tab, pdf_url, pdf_path)
+                        downloaded = True
+                        print(f"Downloaded background PDF: {pdf_path}")
+                        break
+                    except Exception as e:
+                        print(f"WARNING: PDF download failed for {pdf_url}: {e}", file=sys.stderr)
+                if downloaded:
+                    new_body = append_or_replace_background(new_body, f"assets/{pdf_name}")
+            else:
+                print("WARNING: No PDF/report download link found on detail page.", file=sys.stderr)
+        else:
+            print("Skipping PDF scan/download. Set PARSE_BV_TRY_PDF=1 to attempt it.")
+
+        if is_new:
+            # Ensure basic name fields if template did not have them.
+            parts = title_case_name(name).split()
+            if parts and not yaml_scalar(merged.get("first_name")):
+                merged["first_name"] = parts[0]
+            if len(parts) > 1 and not yaml_scalar(merged.get("last_name")):
+                merged["last_name"] = parts[-1]
+
+        person_path.parent.mkdir(parents=True, exist_ok=True)
+        person_path.write_text(render_frontmatter(merged, order) + "\n" + new_body.lstrip("\n"), encoding="utf-8")
+        print(f"Updated: {person_path}")
+    finally:
+        # Clean up report tabs that BeenVerified opened during this run.
+        # Keep the original search/dashboard tab attached but do not close it.
+        # Set PARSE_BV_KEEP_REPORT_TABS=1 or PARSE_BV_KEEP_TAB=1 to preserve
+        # report tabs for browser-side debugging.
+        try:
+            keep_reports = os.environ.get("PARSE_BV_KEEP_REPORT_TABS") == "1" or KEEP_TAB
+            if not keep_reports:
+                for tid in sorted(getattr(tab, "opened_report_tab_ids", set())):
+                    if tid and tid != getattr(tab, "search_tab_id", None):
+                        tab.close_tab_by_id(tid)
+            else:
+                print("Keeping BeenVerified report tabs open because PARSE_BV_KEEP_REPORT_TABS=1 or PARSE_BV_KEEP_TAB=1.")
+
+            close_search = (
+                os.environ.get("PARSE_BV_CLOSE_SEARCH_TAB") == "1"
+                or getattr(tab, "search_tab_created_by_this_run", False)
+            )
+            if close_search and not KEEP_TAB:
+                search_id = getattr(tab, "search_tab_id", None)
+                current_id = getattr(tab, "tab_id", None)
+                if search_id and search_id != current_id:
+                    tab.close_tab_by_id(search_id)
+                elif search_id and search_id == current_id:
+                    # If still attached to the search tab, close it after closing
+                    # the websocket below would be too late to use /json/close.
+                    tab.close_tab_by_id(search_id)
+            elif getattr(tab, "search_tab_id", None):
+                print("Keeping original/search BeenVerified tab open. Set PARSE_BV_CLOSE_SEARCH_TAB=1 to close it.")
+        finally:
+            tab.close()
+
+
+if __name__ == "__main__":
+    main()

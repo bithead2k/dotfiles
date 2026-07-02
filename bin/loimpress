@@ -1,0 +1,2 @@
+#!/opt/local/bin/bash
+/Applications/OpenOffice.app/Contents/MacOS/soffice --impress "$@"

@@ -1,0 +1,43 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: pg_dumps
+# 
+#         USAGE: ./pg_dumps
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 09/16/2016 12:44
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+function usage() {
+    echo $(basename $0) -h machine [database] [options] 
+    echo $(basename $0) -h machine
+    exit 1
+}
+
+function dblist () {
+    echo 'SELECT datname FROM pg_database WHERE datname NOT IN ($$postgres$$,$$template0$$,$$template1$$,$$tripmaster_master$$,$$tripmaster_slave$$)' |
+        ssh sync01bd.d.tripadvisor.com "PGCONNECT_TIMEOUT=5 psql -P pager=off -v ON_ERROR_STOP=1 -U dbadmin postgres $@ -qtA | sort"
+    [[ $? -eq 255 ]] && {
+        echo "ssh-add"
+        echo 'SELECT datname FROM pg_database WHERE datname NOT IN ($$postgres$$,$$template0$$,$$template1$$,$$tripmaster_master$$,$$tripmaster_slave$$)' |
+        ssh sync01bd.d.tripadvisor.com "PGCONNECT_TIMEOUT=5 psql -P pager=off -v ON_ERROR_STOP=1 -U dbadmin postgres $@ -qtA | sort"
+    }
+    exit
+}
+
+[[ $# -lt 1 ]] && usage
+
+[[ $# -lt 3 ]] && dblist "$@"
+
+ssh sync01bd.d.tripadvisor.com "PGCONNECT_TIMEOUT=5 pg_dump -U dbadmin $@"

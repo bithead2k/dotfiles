@@ -1,0 +1,213 @@
+#!/bin/bash - 
+#===============================================================================
+#
+#          FILE: csvheader2psqltable
+# 
+#         USAGE: ./csvheader2psqltable 
+# 
+#   DESCRIPTION: 
+# 
+#       OPTIONS: ---
+#  REQUIREMENTS: ---
+#          BUGS: ---
+#         NOTES: ---
+#        AUTHOR: Kirk Roybal (KLR), kroybal@tripadvisor.com
+#  ORGANIZATION: 
+#       CREATED: 08/24/2016 08:18
+#      REVISION:  ---
+#===============================================================================
+
+set -o nounset                              # Treat unset variables as an error
+
+ScriptVersion="1.0"
+
+timeout=$(which timeout)
+[[ $timeout == "" ]] && timeout='/opt/local/libexec/gnubin/timeout'
+
+function tolower() {
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  tolower
+#   DESCRIPTION:  lowercase a string
+#    PARAMETERS:  string
+#       RETURNS:  string
+#-------------------------------------------------------------------------------
+    echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+function toupper() {
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  toupper
+#   DESCRIPTION:  uppercase a string
+#    PARAMETERS:  string
+#       RETURNS:  string
+#-------------------------------------------------------------------------------
+    echo "$1" | tr '[:lower:]' '[:upper:]'
+}
+
+function clean_header() {
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  clean_header
+#   DESCRIPTION:  
+# a single space *may* part of the field name
+# multiple spaces *may* be a delimeter
+# or, the whole thing may be single space delimited.
+#    PARAMETERS:  string header as a single line
+#       RETURNS:  string header with multi word column names using underscores
+#   can be there = can_be_there
+#-------------------------------------------------------------------------------
+    
+    #change multiple spaces to a paragraph marker
+    #change single spaces to underscores
+    #change paragraph markers back to single spaces 
+    #   (in case ' ' is the column sep)
+
+    case "${sep:(-1)}" in
+        [,t])  
+            echo "$header" | sed 's/ \{2,\}//g' | sed 's/ /_/g' 
+            ;;
+        ' ')
+            #if we have multiple space characters, they are probably delimiters
+            [[ $(/opt/local/libexec/gnubin/expr index "${header//  /❡}" "❡") -gt 0 ]] && {
+                echo "$header" | sed 's/ \{2,\}/❡/g' | sed 's/ /_/g' | sed 's/❡/ /g'
+            } || {
+                echo "$header"
+            }            
+            ;;
+        *)  echo "$header";;
+    esac
+    
+}
+
+function make_sql() {
+#---  FUNCTION  ----------------------------------------------------------------
+#          NAME:  make_sql
+#   DESCRIPTION:  make a CREATE TABLE statement from a delimited list of strings
+#    PARAMETERS:  all variables global
+#       RETURNS:  String: CREATE TABLE tablename (id, inserted, ${columns[@]});
+#-------------------------------------------------------------------------------
+    
+    header=$(clean_header)
+    fields=(${header//${sep:-,}/ })
+
+    [[ $fields == "" ]] && {
+        echo "Couldn't find any fields in $header : ${fields[@]}"
+        exit 1
+    }
+
+    ifexists=" "
+    [[ $exists == 'true' ]] && ifexists=" IF NOT EXISTS "
+
+    [[ $drop == 'true' ]] && echo "DROP TABLE IF EXISTS $tablename;"
+
+    echo "CREATE TABLE${ifexists}${tablename} ("
+
+    [[ $withid == 'true' ]] && {
+        echo "    id bigserial primary key,"
+        echo "    inserted timestamptz not null default now(),"
+    }
+    for field in "${fields[@]}"
+    do
+        sep=,
+        #no comma on the last column
+        [[ ${fields[${#fields[@]}-1]} == $field ]] && sep=
+        field=$(tolower ${field})
+        echo "    \"$field\" TEXT$sep"
+    done
+
+    #close the statement
+    echo ");"
+
+}
+
+function usage ()
+{
+#===  FUNCTION  ================================================================
+#         NAME:  usage
+#  DESCRIPTION:  Display usage information.
+#===============================================================================
+	cat <<- EOT
+
+  Usage :  ${0##/*/} [options] [--] 
+
+  Examples:
+
+  ${0##/*/} -f mydata.csv
+  cat mydata.csv | ${0##/*/} 
+
+  Options:
+  -c|create     with DROP statements
+  -e|exists     with IF NOT EXISTS 
+  -d|debug      set -x
+  -f|file name  csv file with header
+  -h|help       Display this message
+  -i|id         Suppress the id and inserted columns
+  -n|name name  Table name
+  -s|sep  delim CSV Delimiter, default is comma
+                Options are:
+                C Comma
+                T Tab
+                S Spaces
+  -t|tname name New table name
+  -v|version    Display script version
+
+	EOT
+exit 1    
+}    # ----------  end of function usage  ----------
+
+#-----------------------------------------------------------------------
+#  Handle command line arguments
+#-----------------------------------------------------------------------
+
+
+#read from stdin if no filename given
+infile=-
+sep=,
+tablename=mytable
+withid=true
+drop=false
+exists=false
+
+while getopts ":cdef:hin:s:t:v" opt
+do
+  case $opt in
+
+    c|create   )  drop=true;;
+
+    e|exists   )  exists=true;;
+
+    d|debug    )  set -x;;
+
+    f|file     )  infile=$OPTARG
+                  tablename=$(echo $infile | sed 's_\..*$__')
+                  tablename=$(echo $tablename | sed 's_.*/__')
+                  ;;
+
+    h|help     )  usage;;
+
+    i|id       )  withid=false;;
+
+    n|name     )  tablename=$OPTARG;;
+
+    s|sep      )  case $OPTARG in
+                    C) sep=,;;
+                    T) sep='\\t';;
+                    S) sep=' ';;
+                    *) usage;;
+                  esac
+                  ;;
+
+    v|version  )  echo "$0 -- Version $ScriptVersion"; exit 0   ;;
+
+    \? )  echo -e "\n  Option does not exist : $OPTARG\n"
+          usage
+          ;;
+
+  esac    # --- end of case ---
+done
+shift $(($OPTIND-1))
+
+header=$($timeout -s9 3s head -n1 "$infile")
+
+[[ $header == "" ]] && usage
+
+make_sql 
