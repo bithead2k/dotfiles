@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#===============================================================================
+#
+#          FILE:  dotfiles-bootstrap
+#
+#         USAGE:  dotfiles-bootstrap [--ssh] [--plugins] [--no-alias] [--repo URL]
+#
+#                 On a bare machine, fetch and run directly:
+#                   curl -fsSL https://raw.githubusercontent.com/bithead2k/dotfiles/main/bin/dotfiles-bootstrap | bash
+#                 (or download and run:  bash dotfiles-bootstrap --plugins)
+#
+#   DESCRIPTION:  Bootstrap the dotfiles on a fresh machine:
+#                   1. clone the bare repo into ~/.dotfiles
+#                   2. set deny-all so `dotfiles status` stays clean
+#                   3. check files out into $HOME (backing up any conflicts)
+#                   4. add the `dotfiles` alias to your shell rc
+#                   5. (optional) install the Vim plugins
+#
+#       OPTIONS:  --ssh        use the SSH remote for push (git@github.com:...)
+#                 --plugins    also run install_vim_plugins after checkout
+#                 --no-alias   do not modify shell rc files
+#                 --repo URL   clone from a different URL
+#                 -h, --help   this help
+#
+#  REQUIREMENTS:  git, curl (for remote fetch); vim for --plugins
+#        AUTHOR:  Kirk Roybal, kirk.roybal@gmail.com
+#===============================================================================
+set -euo pipefail
+
+REPO_HTTPS="https://github.com/bithead2k/dotfiles.git"
+REPO_SSH="git@github.com:bithead2k/dotfiles.git"
+REPO="${DOTFILES_REPO:-$REPO_HTTPS}"
+GITDIR="$HOME/.dotfiles"
+USE_SSH=0
+DO_PLUGINS=0
+DO_ALIAS=1
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --ssh)       USE_SSH=1 ;;
+        --plugins)   DO_PLUGINS=1 ;;
+        --no-alias)  DO_ALIAS=0 ;;
+        --repo)      shift; REPO="${1:?--repo needs a URL}" ;;
+        -h|--help)   sed -n '2,/^#===.*=$/{/^#!/d;s/^#//;s/^ //;p}' "$0" | sed '/^===/d'; exit 0 ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+command -v git >/dev/null || { echo "error: git is required" >&2; exit 1; }
+dot() { git --git-dir="$GITDIR" --work-tree="$HOME" "$@"; }
+
+# 1. clone the bare repo (idempotent)
+if [ -d "$GITDIR" ]; then
+    echo ">> $GITDIR already exists; reusing it"
+else
+    echo ">> cloning $REPO -> $GITDIR"
+    git clone --bare "$REPO" "$GITDIR"
+fi
+
+# 2. deny-all: nothing is tracked unless explicitly `add -f`'d (protects secrets)
+printf '*\n' > "$GITDIR/info/exclude"
+
+# 3. check out into $HOME.  A bare-clone `checkout` silently OVERWRITES existing
+#    untracked files, so proactively relocate every tracked path that already
+#    exists to a timestamped backup first -- never clobber a real config.
+echo ">> checking out into $HOME"
+backup="$HOME/.dotfiles-backup/$(date +%Y%m%d-%H%M%S)"
+moved=0
+while IFS= read -r f; do
+    if [ -e "$HOME/$f" ] || [ -L "$HOME/$f" ]; then
+        mkdir -p "$backup/$(dirname "$f")"
+        mv "$HOME/$f" "$backup/$f"
+        moved=1
+    fi
+done < <(git --git-dir="$GITDIR" ls-tree -r --name-only HEAD)
+[ "$moved" -eq 1 ] && echo ">> backed up pre-existing files to $backup"
+dot checkout
+
+# 4. keep status readable; optionally point push at SSH
+dot config status.showUntrackedFiles no
+if [ "$USE_SSH" -eq 1 ]; then
+    dot remote set-url origin "$REPO_SSH" 2>/dev/null || dot remote add origin "$REPO_SSH"
+    echo ">> push remote set to $REPO_SSH"
+fi
+
+# 5. install the management alias into shell rc files (idempotent)
+if [ "$DO_ALIAS" -eq 1 ]; then
+    alias_line="alias dotfiles='git --git-dir=\$HOME/.dotfiles --work-tree=\$HOME'"
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -f "$rc" ] || continue
+        grep -qF 'git-dir=$HOME/.dotfiles' "$rc" || printf '\n%s\n' "$alias_line" >> "$rc"
+    done
+    echo ">> 'dotfiles' alias added to shell rc (open a new shell to use it)"
+fi
+
+# 6. optionally rebuild the Vim plugins (needs vim installed)
+if [ "$DO_PLUGINS" -eq 1 ]; then
+    if [ -x "$HOME/bin/install_vim_plugins" ]; then
+        echo ">> installing vim plugins"
+        "$HOME/bin/install_vim_plugins" || echo "!! plugin install reported errors" >&2
+    else
+        echo "!! ~/bin/install_vim_plugins not found (checkout incomplete?)" >&2
+    fi
+fi
+
+cat <<'EOF'
+
+Bootstrap complete.
+  - New shell (or `source ~/.bashrc`) to get the `dotfiles` alias.
+  - Install Vim if needed, then:  install_vim_plugins
+  - To push later over SSH:  dotfiles remote set-url origin git@github.com:bithead2k/dotfiles.git
+EOF

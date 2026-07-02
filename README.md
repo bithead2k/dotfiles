@@ -15,6 +15,20 @@ Third-party Vim plugins, secrets, shell histories, and browser/app data are
 
 ## 1. Check out the dotfiles
 
+### Quick (automated)
+
+One command does the clone, checkout (backing up any existing files),
+deny-all safety, and shell alias:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bithead2k/dotfiles/main/bin/dotfiles-bootstrap | bash
+```
+
+Add `--plugins` to also install the Vim plugins, or `--ssh` to set the push
+remote to SSH. See `dotfiles-bootstrap --help`. To do it by hand instead:
+
+### Manual
+
 On a fresh machine (needs `git`):
 
 ```sh
