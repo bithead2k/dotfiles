@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+#===============================================================================
+#
+#          FILE:  install_vim_plugins
+#
+#         USAGE:  install_vim_plugins [-f|--force] [-n|--dry-run] [-l|--list]
+#
+#   DESCRIPTION:  (Re)download/install the Vim native-package plugins that are
+#                 auto-loaded from ~/.vim/pack/<group>/start/.  These are the
+#                 third-party plugins the dotfiles repo intentionally does NOT
+#                 track, so this rebuilds them on a fresh checkout/machine.
+#
+#                 Missing plugins are cloned; existing ones are updated to the
+#                 latest tip of their branch.  --force wipes and re-clones.
+#
+#       OPTIONS:  -f, --force     remove and re-clone each plugin fresh
+#                 -n, --dry-run   print the actions without changing anything
+#                 -l, --list      list configured plugins and exit
+#                 -h, --help      this help
+#
+#  REQUIREMENTS:  git; (optional) vim + node/yarn for markdown-preview build
+#        AUTHOR:  Kirk Roybal, kirk.roybal@gmail.com
+#===============================================================================
+set -euo pipefail
+
+VIMDIR="${VIMDIR:-$HOME/.vim}"
+
+# group | name | branch | url   -- the auto-loaded (pack/*/start) plugins
+PLUGINS=(
+    "dist|vim-airline|master|https://github.com/vim-airline/vim-airline"
+    "dist|vim-airline-themes|master|https://github.com/vim-airline/vim-airline-themes"
+    "plugins|nerdtree|master|https://github.com/preservim/nerdtree"
+    "plugins|rust.vim|master|https://github.com/rust-lang/rust.vim"
+    "plugins|obsidian.nvim|main|https://github.com/epwalsh/obsidian.nvim"
+    "markdown-preview|markdown-preview.nvim|master|https://github.com/iamcco/markdown-preview.nvim"
+)
+
+FORCE=0
+DRYRUN=0
+
+usage() { sed -n '2,/^#===.*=$/{/^#!/d;s/^#//;s/^ //;p}' "$0" | sed '/^===/d'; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -f|--force)   FORCE=1 ;;
+        -n|--dry-run) DRYRUN=1 ;;
+        -l|--list)
+            for e in "${PLUGINS[@]}"; do
+                IFS='|' read -r g n b u <<<"$e"
+                printf '%-24s %-8s %s\n' "$n" "$b" "$u"
+            done
+            exit 0 ;;
+        -h|--help)    usage; exit 0 ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+command -v git >/dev/null || { echo "error: git is required" >&2; exit 1; }
+
+run() { if [ "$DRYRUN" -eq 1 ]; then echo "+ $*"; else "$@"; fi; }
+
+fail=0
+for entry in "${PLUGINS[@]}"; do
+    IFS='|' read -r group name branch url <<<"$entry"
+    dest="$VIMDIR/pack/$group/start/$name"
+
+    if [ "$FORCE" -eq 1 ] && [ -d "$dest" ]; then
+        echo ">> removing $dest"
+        run rm -rf "$dest"
+    fi
+
+    if [ -d "$dest/.git" ]; then
+        echo ">> updating $name ($branch)"
+        # robust update for shallow clones: fetch tip and hard-reset
+        if ! { run git -C "$dest" fetch --depth 1 origin "$branch" &&
+               run git -C "$dest" reset --hard "origin/$branch"; }; then
+            echo "!! failed to update $name" >&2; fail=1; continue
+        fi
+    else
+        echo ">> cloning $name ($branch)"
+        run mkdir -p "$(dirname "$dest")"
+        if ! run git clone --depth 1 --branch "$branch" "$url" "$dest"; then
+            echo "!! failed to clone $name" >&2; fail=1; continue
+        fi
+    fi
+done
+
+# markdown-preview.nvim ships no runtime server; it needs a one-time build.
+mkdp="$VIMDIR/pack/markdown-preview/start/markdown-preview.nvim"
+if [ -d "$mkdp" ] && [ "$DRYRUN" -eq 0 ]; then
+    echo ">> building markdown-preview.nvim"
+    if command -v vim >/dev/null 2>&1 &&
+       vim -es -N -u NONE \
+           -c "set rtp+=$mkdp" \
+           -c "call mkdp#util#install()" \
+           -c "qa!" >/dev/null 2>&1; then
+        :
+    elif command -v yarn >/dev/null 2>&1; then
+        ( cd "$mkdp/app" && yarn install ) || {
+            echo "!! markdown-preview build failed; run :call mkdp#util#install() in vim" >&2
+            fail=1
+        }
+    else
+        echo "note: finish markdown-preview by running  :call mkdp#util#install()  in vim"
+    fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+    echo "done with errors." >&2
+    exit 1
+fi
+echo "done."
