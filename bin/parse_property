@@ -1,0 +1,523 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# parse_property — one-shot Obsidian people-note property-record lookup.
+# Version: bash_v7
+#
+# This is intentionally a Bash entrypoint, matching the user's working KLR
+# scripts: activate the KLR venv if present, then run the Python body.  The
+# Python body uses direct OpenAI REST calls rather than depending on a new
+# openai-python SDK surface.
+
+if [[ -n "${KLR_VENV:-}" && -f "$KLR_VENV/bin/activate" ]]; then
+    # shellcheck disable=SC1090
+    source "$KLR_VENV/bin/activate"
+elif [[ -f "$HOME/.venvs/klr/bin/activate" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.venvs/klr/bin/activate"
+fi
+
+PYTHON_BIN="${KLR_PYTHON:-python3}"
+exec "$PYTHON_BIN" - "$@" <<'PY'
+import argparse
+import difflib
+import json
+import os
+import re
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from datetime import date
+from pathlib import Path
+from typing import Iterable, Optional
+
+HEADING = "# Property Records"
+START = "<!-- property_lookup:start -->"
+END = "<!-- property_lookup:end -->"
+
+DEFAULT_MODEL = (
+    os.environ.get("OPENAI_PROPERTY_MODEL")
+    or os.environ.get("KLR_PROPERTY_MODEL")
+    or os.environ.get("KLR_GPT_MODEL")
+    or os.environ.get("KLR_OPENAI_MODEL")
+    or os.environ.get("OPENAI_MODEL")
+    or "gpt-4o"
+)
+
+PROMPT_TEMPLATE = """You are the property-record lookup component for parse_property.
+
+I will provide a complete Obsidian people note with any prior managed Property Records block stripped out. Use the remaining note as evidence. It may contain only a name, or it may contain aliases, addresses, movement history, relatives, business names, court records, prison records, phone/address history, or other location clues.
+
+Task:
+Search public property ownership, appraisal district, assessor, tax, parcel, GIS, recorder, and deed records that may plausibly belong to this person.
+
+Source priority:
+1. Official appraisal district / assessor / tax / GIS / recorder / county clerk records.
+2. Official municipal, county, or state open-data records.
+3. Real-estate aggregator sites such as Redfin, Zillow, Realtor, Trulia, Homes.com only as secondary corroboration.
+4. Do not treat aggregator listing pages as proof of ownership unless they expose an official parcel/account reference or corroborate a known address.
+
+Return ONLY Markdown suitable for insertion inside this managed Obsidian section:
+
+{start}
+<your output goes here>
+{end}
+
+Rules:
+- You have access to the web_search tool in this API call. Use it for this lookup.
+- Do not claim you cannot conduct real-time searches, access external databases, or browse. If a source is unavailable, say that specific source was unavailable and continue with other public sources.
+- Do not return instructions telling the user how to search. Perform the lookup and return the result section.
+- Do not return the full Obsidian note.
+- Do not return YAML frontmatter.
+- Keep lookup status metadata in this generated Markdown block only; do not create or suggest YAML fields.
+- Do not return the heading "# Property Records".
+- Do not return {start} or {end} markers.
+- Do not invent parcel IDs, account numbers, addresses, ownership facts, sale/deed facts, values, or source URLs.
+- Every factual property claim must include a source URL when available.
+- Distinguish Strong Matches, Probable Matches, Possible Matches, Weak / Name-Only Matches, Rejected / Ruled Out, and Searched / No Confirmed Match.
+- If no property records are found, return a normal Markdown section with Status: not found and explain what was searched.
+- If the note gives only a name, say clearly that the search basis was name-only.
+- Use today's date as the checked date: {today}.
+- Keep the output concise enough for an Obsidian people note.
+
+Required Markdown shape:
+
+_Last checked: {today}_
+
+## Summary
+
+- **Checked:** {today}
+- **Status:** found | possible | weak | not found | error
+- **Best confidence:** strong | probable | possible | weak | none
+- **Search basis:** <brief basis>
+
+## Search Basis Extracted from Note
+
+- **Names searched:** ...
+- **Aliases considered:** ...
+- **Address hints:** ...
+- **Location hints:** ...
+- **Associated names/entities:** ...
+
+## Strong Matches
+
+_None._
+
+## Probable Matches
+
+_None._
+
+## Possible Matches
+
+_None._
+
+## Weak / Name-Only Matches
+
+_None._
+
+## Rejected / Ruled Out
+
+_None._
+
+## Searched / No Confirmed Match
+
+- ...
+
+## Notes
+
+...
+
+===== BEGIN OBSIDIAN NOTE =====
+{note}
+===== END OBSIDIAN NOTE =====
+"""
+
+
+RETRY_PREFIX = """The previous response was invalid because it claimed inability to search or gave advice instead of performing the lookup.
+
+Correction:
+- This API call includes a web_search tool. Use it now.
+- Perform the property-record lookup using the Obsidian note below.
+- Return only the required Markdown block body.
+- Do not apologize.
+- Do not explain that you cannot browse or cannot access external databases.
+- If official sources are unavailable, use secondary public sources and state the limitation.
+
+"""
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"parse_property: {msg}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        die(f"not found: {path}")
+    except UnicodeDecodeError as e:
+        die(f"could not read UTF-8 text from {path}: {e}")
+
+
+def detect_newline(text: str) -> str:
+    return "\r\n" if "\r\n" in text and text.count("\r\n") >= text.count("\n") / 2 else "\n"
+
+
+def note_for_prompt(note: str) -> str:
+    """Remove the previous generated lookup block before asking the model again.
+
+    parse_property submits the whole people note for context, but the managed
+    Property Records block is previous model output, not source evidence. If a
+    prior run wrote a refusal/advice block, feeding it back causes the next run
+    to anchor on or repeat that failure.
+    """
+    start_idx = note.find(START)
+    end_idx = note.find(END)
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        return note[:start_idx] + START + "\n[previous generated property lookup block intentionally omitted]\n" + END + note[end_idx + len(END):]
+    return note
+
+
+def make_prompt(note: str) -> str:
+    return PROMPT_TEMPLATE.format(
+        today=date.today().isoformat(),
+        note=note_for_prompt(note),
+        start=START,
+        end=END,
+    )
+
+
+def is_capability_failure_text(text: str) -> bool:
+    lowered = text.lower()
+    refusal_markers = [
+        "parse_property_error:",
+        "i'm unable to conduct real-time searches",
+        "i am unable to conduct real-time searches",
+        "i’m unable to conduct real-time searches",
+        "i'm unable to access external databases",
+        "i am unable to access external databases",
+        "i’m unable to access external databases",
+        "i can't access external databases",
+        "i cannot access external databases",
+        "i can’t access external databases",
+        "i can't browse",
+        "i cannot browse",
+        "i can’t browse",
+        "i don't have browsing",
+        "i do not have browsing",
+        "i don’t have browsing",
+        "i can't perform live searches",
+        "i cannot perform live searches",
+        "i can’t perform live searches",
+        "you can perform the task",
+        "you can search county",
+        "typically, you can search",
+        "use available resources online",
+    ]
+    return any(marker in lowered for marker in refusal_markers)
+
+
+def clean_generated_block(text: str) -> str:
+    s = text.strip()
+
+    # Strip common fenced-code wrappers if the model adds them despite the prompt.
+    fence = re.fullmatch(r"```(?:markdown|md)?\s*\n(?P<body>.*)\n```", s, re.S | re.I)
+    if fence:
+        s = fence.group("body").strip()
+
+    validate_generated_block(s)
+    return s
+
+
+def validate_generated_block(text: str) -> None:
+    s = text.strip()
+    if not s:
+        die("model returned no section content")
+
+    forbidden = [START, END]
+    for marker in forbidden:
+        if marker in s:
+            die(f"model returned managed marker: {marker}")
+
+    if s.startswith("---"):
+        die("model appears to have returned YAML/frontmatter")
+
+    if s.startswith(HEADING) or f"\n{HEADING}" in s:
+        die("model returned the Property Records heading; script owns it")
+
+    # Catch obvious full-file rewrites while still allowing Markdown headings.
+    if re.search(r"(?m)^#\s+[^\n]+\n.*^# Property Records", s, re.S):
+        die("model appears to have returned a larger note instead of only the managed block")
+
+    # Refuse to write capability-failure / advice-only responses. A valid
+    # "not found" block is fine; a response saying the model cannot search is
+    # not a property-record lookup result and should not pollute the note.
+    lowered = s.lower()
+    if is_capability_failure_text(s):
+        die("model returned a capability-failure/advice response instead of property-record lookup results; refusing to write")
+
+    # A real lookup block should include the canonical sections. This still
+    # allows a no-records-found result, but catches one-paragraph advice.
+    required_sections = ["## Summary", "## Search Basis", "## Searched / No Confirmed Match"]
+    missing = [section for section in required_sections if section.lower() not in lowered]
+    if missing:
+        die("model output is missing required lookup sections: " + ", ".join(missing))
+
+
+def normalize_newlines(text: str, newline: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.replace("\n", newline)
+
+
+def update_property_section(note: str, generated: str) -> str:
+    newline = detect_newline(note)
+    block = f"{START}{newline}{normalize_newlines(generated.strip(), newline)}{newline}{END}"
+
+    start_idx = note.find(START)
+    end_idx = note.find(END)
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        return note[:start_idx] + block + note[end_idx + len(END):]
+    if start_idx != -1 or end_idx != -1:
+        die("found only one property_lookup marker; refusing to guess replacement range")
+
+    # Insert under existing top-level heading if present. Preserve existing human text.
+    lines = note.splitlines(keepends=True)
+    out = []
+    inserted = False
+    for line in lines:
+        out.append(line)
+        if not inserted and line.strip() == HEADING:
+            if not line.endswith(("\n", "\r")):
+                out.append(newline)
+            out.append(newline)
+            out.append(block)
+            out.append(newline)
+            inserted = True
+    if inserted:
+        return "".join(out)
+
+    # No section exists; append one.
+    tail = "" if note.endswith(("\n", "\r")) else newline
+    return note + tail + newline + HEADING + newline + newline + block + newline
+
+
+def atomic_write(path: Path, content: str) -> None:
+    parent = path.parent
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        finally:
+            raise
+
+
+def unified_diff(old: str, new: str, path: Path) -> str:
+    return "".join(
+        difflib.unified_diff(
+            old.splitlines(keepends=True),
+            new.splitlines(keepends=True),
+            fromfile=f"{path} (old)",
+            tofile=f"{path} (new)",
+        )
+    )
+
+
+def extract_response_text(data: dict) -> str:
+    direct = data.get("output_text")
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    parts = []
+    for item in data.get("output", []) or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content", []) or []:
+            if not isinstance(content, dict):
+                continue
+            text = content.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+            elif isinstance(content.get("text"), dict) and isinstance(content["text"].get("value"), str):
+                parts.append(content["text"]["value"])
+    return "\n".join(parts).strip()
+
+
+def post_json(url: str, payload: dict, verbose: bool) -> tuple[int, str]:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        die("OPENAI_API_KEY is not set")
+
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            return resp.status, resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", errors="replace")
+    except urllib.error.URLError as e:
+        die(f"OpenAI connection error: {e}")
+
+
+def call_openai_responses(prompt: str, model: str, temperature: Optional[float], verbose: bool) -> str:
+    # Try likely web-search tool names. This avoids tying the script to one docs era.
+    env_tool = os.environ.get("OPENAI_WEB_SEARCH_TOOL_TYPE")
+    tool_types = [env_tool] if env_tool else ["web_search", "web_search_preview"]
+
+    last_error = None
+    for tool_type in tool_types:
+        payload = {
+            "model": model,
+            "input": prompt,
+            "tools": [{"type": tool_type}],
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if verbose:
+            print(f"parse_property: calling OpenAI /v1/responses model={model} tool={tool_type}", file=sys.stderr)
+
+        status, body = post_json("https://api.openai.com/v1/responses", payload, verbose)
+        if 200 <= status < 300:
+            data = json.loads(body)
+            output_text = extract_response_text(data)
+            if not output_text:
+                die("OpenAI response did not contain generated text")
+            return output_text
+
+        last_error = f"OpenAI HTTP {status}: {body}"
+        # If the first web tool name is rejected, try the other one. For anything
+        # else, fail fast so we do not hide real auth/model/quota problems.
+        lowered = body.lower()
+        if not (status == 400 and ("web_search" in lowered or "tool" in lowered or "invalid" in lowered)):
+            die(last_error)
+
+    die(last_error or "OpenAI responses call failed")
+
+
+def call_openai_chat_fallback(prompt: str, model: str, temperature: Optional[float], verbose: bool) -> str:
+    # This fallback is intentionally not the default because Chat Completions has
+    # no native web_search tool. It is useful only when the note already contains
+    # enough property-record evidence or for offline/testing flows.
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Return only the requested Markdown block body."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if verbose:
+        print(f"parse_property: calling OpenAI /v1/chat/completions model={model} without web_search", file=sys.stderr)
+    status, body = post_json("https://api.openai.com/v1/chat/completions", payload, verbose)
+    if not (200 <= status < 300):
+        die(f"OpenAI HTTP {status}: {body}")
+    data = json.loads(body)
+    try:
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception:
+        die("OpenAI chat response did not contain generated text")
+
+
+def call_openai(prompt: str, model: str, temperature: Optional[float], verbose: bool, no_web: bool) -> str:
+    if no_web:
+        return call_openai_chat_fallback(prompt, model, temperature, verbose)
+    return call_openai_responses(prompt, model, temperature, verbose)
+
+
+def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        prog="parse_property",
+        description="Lookup public property records for an Obsidian people note and update a managed Markdown section.",
+    )
+    p.add_argument("note", type=Path, help="Path to Obsidian people Markdown note")
+    p.add_argument("--model", default=DEFAULT_MODEL, help=f"OpenAI model name (default: {DEFAULT_MODEL})")
+    p.add_argument("--write", action="store_true", help="Write the updated note atomically")
+    p.add_argument("--dry-run", action="store_true", help="Print unified diff instead of writing")
+    p.add_argument("--print-block", action="store_true", help="Print generated managed block body to stdout even with --dry-run/--write")
+    p.add_argument("--temperature", type=float, default=None, help="Optional model temperature")
+    p.add_argument("--from-file", type=Path, help="Use pre-generated Markdown block body instead of calling OpenAI")
+    p.add_argument("--save-block", type=Path, help="Save generated Markdown block body to this file before updating the note")
+    p.add_argument("--no-web", action="store_true", help="Use Chat Completions fallback without web search")
+    p.add_argument("--verbose", action="store_true", help="Print progress to stderr")
+    return p.parse_args(argv)
+
+
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    args = parse_args(argv)
+    if args.write and args.dry_run:
+        die("choose either --write or --dry-run, not both")
+
+    requested_path = args.note.expanduser()
+    try:
+        note_path = requested_path.resolve(strict=True)
+    except FileNotFoundError:
+        die(f"not found: {requested_path}")
+    if args.verbose and note_path != requested_path:
+        print(f"parse_property: resolved note path {requested_path} -> {note_path}", file=sys.stderr)
+    old_note = read_text(note_path)
+
+    if args.from_file:
+        generated_raw = read_text(args.from_file.expanduser())
+    else:
+        prompt = make_prompt(old_note)
+        generated_raw = call_openai(prompt, args.model, args.temperature, args.verbose, args.no_web)
+        if (not args.no_web) and is_capability_failure_text(generated_raw):
+            if args.verbose:
+                print("parse_property: model returned capability/advice response; retrying with explicit web_search correction", file=sys.stderr)
+            generated_raw = call_openai(RETRY_PREFIX + prompt, args.model, args.temperature, args.verbose, args.no_web)
+
+    generated = clean_generated_block(generated_raw)
+
+    if args.save_block:
+        save_path = args.save_block.expanduser()
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        save_path.write_text(generated.rstrip() + "\n", encoding="utf-8")
+        if args.verbose:
+            print(f"parse_property: saved generated block to {save_path}", file=sys.stderr)
+
+    new_note = update_property_section(old_note, generated)
+    if START not in new_note or END not in new_note:
+        die("internal error: updated note does not contain managed property_lookup markers")
+    if args.print_block or (not args.write and not args.dry_run):
+        print(generated)
+
+    if args.dry_run:
+        diff = unified_diff(old_note, new_note, note_path)
+        print(diff if diff else "parse_property: no changes", end="" if diff else "\n")
+        return 0
+
+    if args.write:
+        if new_note == old_note:
+            print(f"parse_property: no changes: {note_path}", file=sys.stderr)
+            return 0
+        atomic_write(note_path, new_note)
+        written = read_text(note_path)
+        if START not in written or END not in written:
+            die(f"write verification failed: managed markers not found after write: {note_path}")
+        if generated.strip() not in written:
+            die(f"write verification failed: generated block not found after write: {note_path}")
+        print(f"parse_property: wrote {note_path}", file=sys.stderr)
+        return 0
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
