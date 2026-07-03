@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# PostgreSQL Person of the Week — fetch interviews from postgresql.life
+# parse_pgpow: postgresql.life Person of the Week → surgical Obsidian people importer
+# Fetches interviews from RSS/archive; fills blanks only (same family as parse_li / parse_bv).
 set -euo pipefail
 
 OBSIDIAN="${OBSIDIAN:-$HOME/Documents/notes}"
 PEOPLE_DIR="${OBSIDIAN}/people"
 TEMPLATE="${TEMPLATE:-${OBSIDIAN}/templates/New Person.md}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
-LOG_FILE="${CACHE_DIR}/pg_pow.log"
+LOG_FILE="${CACHE_DIR}/parse_pgpow.log"
 RSS_URL="https://postgresql.life/index.xml"
 INTERVIEWS_URL="https://postgresql.life/categories/interviews/"
 POW_TAG=$'🐘POW'
 
 usage() {
     cat <<'EOF'
-Usage: pg_pow [options] [name-or-slug]
+Usage: parse_pgpow [options] [name-or-slug]
 
 Fetch a PostgreSQL Person of the Week interview from postgresql.life and
 create or update a people note in the Obsidian vault.
@@ -33,7 +34,7 @@ EOF
 
 log() {
     mkdir -p "$(dirname "$LOG_FILE")"
-    printf '%s pg_pow: %s\n' "$(date -Iseconds)" "$*" >>"$LOG_FILE"
+    printf '%s parse_pgpow: %s\n' "$(date -Iseconds)" "$*" >>"$LOG_FILE"
 }
 
 resolve_person() {
@@ -46,7 +47,7 @@ import urllib.request
 query, rss_url = sys.argv[1], sys.argv[2]
 
 def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "pg_pow/2.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "parse_pgpow/2.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8")
 
@@ -58,7 +59,7 @@ def slugify(name):
 def resolve_slug(slug):
     url = f"https://postgresql.life/post/{slug}/"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "pg_pow/2.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "parse_pgpow/2.0"})
         with urllib.request.urlopen(req, timeout=30) as resp:
             if resp.status != 200:
                 return None
@@ -81,7 +82,7 @@ for block in re.findall(r"<item>(.*?)</item>", fetch(rss_url), re.DOTALL):
         items.append((title_m.group(1).strip(), slug, link))
 
 if not items:
-    raise SystemExit("pg_pow: no interviews in RSS feed")
+    raise SystemExit("parse_pgpow: no interviews in RSS feed")
 
 if not query or query == "--latest":
     title, slug, link = items[0]
@@ -108,7 +109,7 @@ for candidate in slug_candidates:
         raise SystemExit(0)
 
 names = ", ".join(t for t, _, _ in items[:5])
-raise SystemExit(f"pg_pow: no match for {query!r} (recent: {names})")
+raise SystemExit(f"parse_pgpow: no match for {query!r} (recent: {names})")
 PY
 }
 
@@ -121,7 +122,7 @@ import urllib.request
 url = sys.argv[1]
 
 def fetch(target):
-    req = urllib.request.Request(target, headers={"User-Agent": "pg_pow/2.0"})
+    req = urllib.request.Request(target, headers={"User-Agent": "parse_pgpow/2.0"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
@@ -152,12 +153,12 @@ link = sys.argv[1]
 base = link if link.endswith("/") else link + "/"
 
 def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "pg_pow/2.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "parse_pgpow/2.0"})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 def head_ok(url):
-    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "pg_pow/2.0"})
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "parse_pgpow/2.0"})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return 200 <= resp.status < 400
@@ -304,7 +305,7 @@ apply_pow_note() {
     trap 'rm -f "$interview_file"' RETURN
     printf '%s\n' "$5" >"$interview_file"
 
-    [[ -f "$TEMPLATE" ]] || { echo "pg_pow: template not found: $TEMPLATE" >&2; return 1; }
+    [[ -f "$TEMPLATE" ]] || { echo "parse_pgpow: template not found: $TEMPLATE" >&2; return 1; }
 
     result=$(python3 - "$note_file" "$TEMPLATE" "$person_name" "$image" "$interview_file" "$person_link" "$mode" "$POW_TAG" <<'PY'
 import re
@@ -633,24 +634,24 @@ PY
     case "$result" in
         STATUS:created)
             log "created ${person_name} (${person_link})"
-            [[ "${quiet:-0}" -eq 0 ]] && echo "pg_pow: created ${note_file}" >&2
+            [[ "${quiet:-0}" -eq 0 ]] && echo "parse_pgpow: created ${note_file}" >&2
             echo "STATUS:created"
             return 0
             ;;
         STATUS:updated)
             log "updated ${person_name} (${person_link})"
-            [[ "${quiet:-0}" -eq 0 ]] && echo "pg_pow: updated ${note_file}" >&2
+            [[ "${quiet:-0}" -eq 0 ]] && echo "parse_pgpow: updated ${note_file}" >&2
             echo "STATUS:updated"
             return 0
             ;;
         STATUS:unchanged)
             log "unchanged ${person_name}"
-            [[ "${quiet:-0}" -eq 0 ]] && echo "pg_pow: unchanged ${note_file}" >&2
+            [[ "${quiet:-0}" -eq 0 ]] && echo "parse_pgpow: unchanged ${note_file}" >&2
             echo "STATUS:unchanged"
             return 2
             ;;
         *)
-            echo "pg_pow: apply failed for ${person_name}" >&2
+            echo "parse_pgpow: apply failed for ${person_name}" >&2
             echo "STATUS:failed"
             return 1
             ;;
@@ -704,7 +705,7 @@ run_backfill() {
         set -e
     done < <(list_interviews)
 
-    echo "pg_pow backfill: created ${created}, updated ${updated}, unchanged ${unchanged}, failed ${failed}"
+    echo "parse_pgpow backfill: created ${created}, updated ${updated}, unchanged ${unchanged}, failed ${failed}"
     log "backfill complete: created=${created} updated=${updated} unchanged=${unchanged} failed=${failed}"
 }
 
@@ -722,7 +723,7 @@ while [[ $# -gt 0 ]]; do
         --open) open_obsidian=1 ;;
         --quiet) quiet=1; open_obsidian=0 ;;
         -h|--help) usage; exit 0 ;;
-        -*) echo "pg_pow: unknown option $1" >&2; usage >&2; exit 1 ;;
+        -*) echo "parse_pgpow: unknown option $1" >&2; usage >&2; exit 1 ;;
         *) query="$1" ;;
     esac
     shift
@@ -739,7 +740,7 @@ if [[ -z "$query" ]]; then
     if command -v xclip >/dev/null 2>&1; then
         query=$(xclip -o 2>/dev/null | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     fi
-    [[ -z "$query" ]] && { echo "pg_pow: provide a name or use --latest" >&2; usage >&2; exit 1; }
+    [[ -z "$query" ]] && { echo "parse_pgpow: provide a name or use --latest" >&2; usage >&2; exit 1; }
 fi
 
 [[ "$query" == "--latest" ]] && quiet=1 && open_obsidian=0
@@ -764,7 +765,7 @@ status_line=$(apply_pow_note write "$person_name" "$person_link" "$PARSED_IMAGE"
 case "$status_line" in
     STATUS:created|STATUS:updated|STATUS:unchanged) ;;
     *)
-        echo "pg_pow: failed to apply note for ${person_name}" >&2
+        echo "parse_pgpow: failed to apply note for ${person_name}" >&2
         exit 1
         ;;
 esac
