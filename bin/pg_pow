@@ -8,7 +8,8 @@ TEMPLATE="${TEMPLATE:-${OBSIDIAN}/templates/New Person.md}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
 LOG_FILE="${CACHE_DIR}/pg_pow.log"
 RSS_URL="https://postgresql.life/index.xml"
-BASE_URL="https://postgresql.life"
+INTERVIEWS_URL="https://postgresql.life/categories/interviews/"
+POW_TAG=$'🐘POW'
 
 usage() {
     cat <<'EOF'
@@ -19,9 +20,11 @@ create or update a people note in the Obsidian vault.
 
 Options:
   --latest       Use the newest RSS entry (for cron; skips if note exists)
+  --backfill     Walk the full interview archive: create missing notes and
+                 add the 🐘POW tag to existing ones when absent
   --markdown     Print note body to stdout (image + interview); no vault write
   --open         Open the note in Obsidian after creating (default for manual use)
-  --quiet        No Obsidian URI; log only (implied by --latest in cron)
+  --quiet        No Obsidian URI; log only (implied by --latest and --backfill)
   -h, --help     Show this help
 
 With no arguments, reads a name from the clipboard (xclip).
@@ -52,6 +55,22 @@ def slugify(name):
     s = re.sub(r"[^\w\s-]", "", s, flags=re.UNICODE)
     return re.sub(r"[\s-]+", "_", s)
 
+def resolve_slug(slug):
+    url = f"https://postgresql.life/post/{slug}/"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "pg_pow/2.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status != 200:
+                return None
+            page = resp.read().decode("utf-8", errors="replace")
+            if "post-container" not in page:
+                return None
+            title_m = re.search(r"<h1>([^<]+)</h1>", page)
+            title = title_m.group(1).strip() if title_m else slug.replace("_", " ").title()
+            return title, slug, url
+    except Exception:
+        return None
+
 items = []
 for block in re.findall(r"<item>(.*?)</item>", fetch(rss_url), re.DOTALL):
     title_m = re.search(r"<title>([^<]+)</title>", block)
@@ -77,22 +96,41 @@ for title, slug, link in items:
         print(f"{title}\t{slug}\t{link}")
         raise SystemExit(0)
 
-if re.match(r"^[\w_]+$", q):
-    url = f"https://postgresql.life/post/{q_slug}/"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "pg_pow/2.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status == 200:
-                page = resp.read().decode("utf-8", errors="replace")
-                title_m = re.search(r"<h1>([^<]+)</h1>", page)
-                title = title_m.group(1).strip() if title_m else q.replace("_", " ").title()
-                print(f"{title}\t{q_slug}\t{url}")
-                raise SystemExit(0)
-    except Exception:
-        pass
+resolved = resolve_slug(q_slug)
+if resolved:
+    title, slug, link = resolved
+    print(f"{title}\t{slug}\t{link}")
+    raise SystemExit(0)
 
 names = ", ".join(t for t, _, _ in items[:5])
 raise SystemExit(f"pg_pow: no match for {query!r} (recent: {names})")
+PY
+}
+
+list_interviews() {
+    python3 - "$INTERVIEWS_URL" <<'PY'
+import re
+import sys
+import urllib.request
+
+url = sys.argv[1]
+
+def fetch(target):
+    req = urllib.request.Request(target, headers={"User-Agent": "pg_pow/2.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+html = fetch(url)
+slugs = []
+seen = set()
+for slug in re.findall(r"/post/([\w_]+)/", html):
+    if slug == "postgresql_person_of_the_week" or slug in seen:
+        continue
+    seen.add(slug)
+    slugs.append(slug)
+
+for slug in slugs:
+    print(f"https://postgresql.life/post/{slug}/")
 PY
 }
 
@@ -246,16 +284,88 @@ print(body)
 PY
 }
 
+parse_fetched() {
+    local parsed="$1"
+    PARSED_TITLE=$(printf '%s\n' "$parsed" | sed -n 's/^TITLE://p' | head -1)
+    PARSED_IMAGE=$(printf '%s\n' "$parsed" | sed -n 's/^IMAGE://p' | head -1)
+    PARSED_BODY=$(printf '%s\n' "$parsed" | awk 'found{print} /^BODY:$/{found=1}')
+}
+
+ensure_pow_tag() {
+    local file="$1"
+    python3 - "$file" "$POW_TAG" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+pow_tag = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+
+if not text.startswith("---\n"):
+    raise SystemExit(1)
+
+end = text.find("\n---\n", 4)
+if end == -1:
+    raise SystemExit(1)
+
+fm, body = text[4:end], text[end + 5 :]
+if pow_tag in fm:
+    raise SystemExit(1)
+
+lines = fm.splitlines()
+out = []
+modified = False
+i = 0
+while i < len(lines):
+    line = lines[i]
+    if line.startswith("tags:"):
+        out.append(line)
+        i += 1
+        tag_lines = []
+        while i < len(lines) and re.match(r"^\s*-\s+", lines[i]):
+            tag_lines.append(lines[i])
+            i += 1
+        out.extend(tag_lines)
+        if not any(pow_tag in tl for tl in tag_lines):
+            out.append(f" - {pow_tag}")
+            modified = True
+        continue
+    out.append(line)
+    i += 1
+
+if not modified:
+    inserted = False
+    rebuilt = []
+    for line in out:
+        if not inserted and line.startswith(("date:", "company:", "attention:", "aliases:")):
+            rebuilt.extend(["tags:", f" - {pow_tag}", ""])
+            inserted = True
+            modified = True
+        rebuilt.append(line)
+    if not inserted:
+        rebuilt.extend(["tags:", f" - {pow_tag}"])
+        modified = True
+    out = rebuilt
+
+if not modified:
+    raise SystemExit(1)
+
+path.write_text("---\n" + "\n".join(out) + "\n---\n" + body, encoding="utf-8")
+raise SystemExit(0)
+PY
+}
+
 build_note() {
     local name="$1" image="$2" body="$3"
     [[ -f "$TEMPLATE" ]] || { echo "pg_pow: template not found: $TEMPLATE" >&2; exit 1; }
 
-    python3 - "$TEMPLATE" "$name" "$image" "$body" <<'PY'
+    python3 - "$TEMPLATE" "$name" "$image" "$body" "$POW_TAG" <<'PY'
 import sys
 from datetime import date
 from pathlib import Path
 
-template_path, name, image, body = sys.argv[1:5]
+template_path, name, image, body, pow_tag = sys.argv[1:6]
 text = Path(template_path).read_text(encoding="utf-8")
 today = date.today().isoformat()
 parts = name.split(None, 1)
@@ -274,7 +384,7 @@ for line in text.splitlines():
         continue
     elif line.strip() == "- 🐘😇People":
         out.append(line)
-        out.append(" - 🐘POW")
+        out.append(f" - {pow_tag}")
     elif line.startswith("company:"):
         out.append("company: ")
     elif line == "![|250]()":
@@ -289,14 +399,100 @@ print(note)
 PY
 }
 
+create_person_note() {
+    local person_name="$1" person_link="$2"
+    local note_file="${PEOPLE_DIR}/${person_name}.md"
+
+    mkdir -p "$PEOPLE_DIR"
+    build_note "$person_name" "$PARSED_IMAGE" "$PARSED_BODY" >"$note_file"
+    obsidian_ensure_filename_alias "$note_file"
+    log "created ${person_name} (${person_link})"
+    echo "pg_pow: created ${note_file}"
+}
+
+update_existing_note() {
+    local person_name="$1"
+    local note_file="${PEOPLE_DIR}/${person_name}.md"
+
+    if ensure_pow_tag "$note_file"; then
+        log "tagged ${person_name}"
+        echo "pg_pow: added ${POW_TAG} tag to ${note_file}"
+        return 0
+    fi
+
+    log "skip existing note: ${person_name}"
+    [[ "${quiet:-0}" -eq 0 ]] && echo "pg_pow: ${note_file} already exists"
+    return 1
+}
+
+process_person() {
+    local person_link="$1"
+    local parsed
+
+    parsed=$(fetch_markdown "$person_link")
+    parse_fetched "$parsed"
+    [[ -n "$PARSED_TITLE" ]] || { log "skip unreadable interview: ${person_link}"; return 2; }
+
+    local person_name="$PARSED_TITLE"
+    local note_file="${PEOPLE_DIR}/${person_name}.md"
+
+    if [[ -f "$note_file" ]]; then
+        update_existing_note "$person_name"
+        return 3
+    fi
+
+    create_person_note "$person_name" "$person_link"
+
+    if [[ "${open_obsidian:-0}" -eq 1 ]]; then
+        obsidian_cli -of "people/${person_name}"
+    fi
+    return 0
+}
+
+run_backfill() {
+    local link created=0 tagged=0 skipped=0 failed=0
+
+    while IFS= read -r link; do
+        [[ -z "$link" ]] && continue
+        set +e
+        parsed=$(fetch_markdown "$link")
+        parse_fetched "$parsed"
+        if [[ -z "$PARSED_TITLE" ]]; then
+            log "backfill skip unreadable: ${link}"
+            ((failed++)) || true
+            set -e
+            continue
+        fi
+
+        note_file="${PEOPLE_DIR}/${PARSED_TITLE}.md"
+        if [[ -f "$note_file" ]]; then
+            if ensure_pow_tag "$note_file"; then
+                log "backfill tagged ${PARSED_TITLE}"
+                ((tagged++)) || true
+            else
+                ((skipped++)) || true
+            fi
+        else
+            create_person_note "$PARSED_TITLE" "$link" >/dev/null
+            ((created++)) || true
+        fi
+        set -e
+    done < <(list_interviews)
+
+    echo "pg_pow backfill: created ${created}, tagged ${tagged}, unchanged ${skipped}, failed ${failed}"
+    log "backfill complete: created=${created} tagged=${tagged} unchanged=${skipped} failed=${failed}"
+}
+
 mode="create"
 query=""
 open_obsidian=1
 quiet=0
+backfill=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --latest) query="--latest" ;;
+        --backfill) backfill=1 ;;
         --markdown) mode="markdown" ;;
         --open) open_obsidian=1 ;;
         --quiet) quiet=1; open_obsidian=0 ;;
@@ -306,6 +502,13 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+
+if [[ "$backfill" -eq 1 ]]; then
+    quiet=1
+    open_obsidian=0
+    run_backfill
+    exit 0
+fi
 
 if [[ -z "$query" ]]; then
     if command -v xclip >/dev/null 2>&1; then
@@ -319,30 +522,22 @@ fi
 IFS=$'\t' read -r person_name slug person_link < <(resolve_person "$query")
 
 parsed=$(fetch_markdown "$person_link")
-note_image=$(printf '%s\n' "$parsed" | sed -n 's/^IMAGE://p' | head -1)
-note_body=$(printf '%s\n' "$parsed" | awk 'found{print} /^BODY:$/{found=1}')
-resolved_title=$(printf '%s\n' "$parsed" | sed -n 's/^TITLE://p' | head -1)
-[[ -n "$resolved_title" ]] && person_name="$resolved_title"
+parse_fetched "$parsed"
+[[ -n "$PARSED_TITLE" ]] && person_name="$PARSED_TITLE"
 
 if [[ "$mode" == "markdown" ]]; then
-    build_note "$person_name" "$note_image" "$note_body"
+    build_note "$person_name" "$PARSED_IMAGE" "$PARSED_BODY"
     exit 0
 fi
 
 note_file="${PEOPLE_DIR}/${person_name}.md"
 if [[ -f "$note_file" ]]; then
-    log "skip existing note: ${person_name}"
-    [[ "$quiet" -eq 0 ]] && echo "pg_pow: ${note_file} already exists"
+    update_existing_note "$person_name"
     exit 0
 fi
 
-mkdir -p "$PEOPLE_DIR"
-build_note "$person_name" "$note_image" "$note_body" >"$note_file"
-obsidian_ensure_filename_alias "$note_file"
-log "created ${person_name} (${person_link})"
+create_person_note "$person_name" "$person_link"
 
 if [[ "$open_obsidian" -eq 1 ]]; then
     obsidian_cli -of "people/${person_name}"
 fi
-
-echo "pg_pow: created ${note_file}"
