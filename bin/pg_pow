@@ -428,14 +428,28 @@ def ensure_tags(existing, *required):
     return items
 
 
-def merge_aliases(existing, canonical_name):
+def normalize_alias_key(value):
+    return re.sub(r"\s+", " ", yaml_scalar(value)).strip().casefold()
+
+
+def alias_known(vals, alias):
+    key = normalize_alias_key(alias)
+    return any(normalize_alias_key(a) == key for a in vals)
+
+
+def merge_aliases(existing, *incoming):
     vals = []
     for alias in parse_tag_items(existing):
-        if alias and alias not in vals:
+        if alias and not alias_known(vals, alias):
             vals.append(alias)
-    canonical_key = re.sub(r"\s+", " ", canonical_name).strip().casefold()
-    vals = [a for a in vals if re.sub(r"\s+", " ", a).strip().casefold() != canonical_key]
-    return render_tags(vals, prefer_list=True) if vals else ""
+    for raw in incoming:
+        if not raw:
+            continue
+        for alias in parse_tag_items(raw):
+            if alias and not alias_known(vals, alias):
+                vals.append(alias)
+    prefer_list = "\n" in yaml_scalar(existing) or len(vals) > 1
+    return render_tags(vals, prefer_list=prefer_list) if vals else ""
 
 
 def merge_pow_frontmatter(old, order, *, is_new, canonical_name):
@@ -461,8 +475,12 @@ def merge_pow_frontmatter(old, order, *, is_new, canonical_name):
     if new_tags != old_tags:
         merged["tags"] = render_tags(new_tags, prefer_list=True)
 
-    if is_new:
-        merged["aliases"] = merge_aliases(merged.get("aliases", ""), canonical_name)
+    old_aliases = parse_tag_items(merged.get("aliases", ""))
+    merged_aliases = merge_aliases(merged.get("aliases", ""), name)
+    if parse_tag_items(merged_aliases) != old_aliases:
+        merged["aliases"] = merged_aliases
+        if "aliases" not in order:
+            order.append("aliases")
 
     for key in incoming_name:
         if key not in order:
@@ -567,6 +585,7 @@ header_line = f"![{name}|250]({image})"
 
 body_before = body
 tags_before = set(parse_tag_items(data.get("tags", "")))
+aliases_before = parse_tag_items(data.get("aliases", ""))
 
 merged, order = merge_pow_frontmatter(data, order, is_new=is_new, canonical_name=canonical)
 body = update_header_image(body, header_line)
@@ -578,11 +597,18 @@ elif is_new and not body.strip():
         body = append_interview(body, interview_text)
 
 tags_after = set(parse_tag_items(merged.get("tags", "")))
+aliases_after = parse_tag_items(merged.get("aliases", ""))
 names_filled = any(
     not yaml_scalar(data.get(key, "")) and yaml_scalar(merged.get(key, ""))
     for key in incoming_name
 )
-changed = is_new or body != body_before or tags_before != tags_after or names_filled
+changed = (
+    is_new
+    or body != body_before
+    or tags_before != tags_after
+    or aliases_before != aliases_after
+    or names_filled
+)
 status = "created" if is_new else ("updated" if changed else "unchanged")
 note = render_frontmatter(merged, order) + body.lstrip("\n")
 
