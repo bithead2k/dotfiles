@@ -4,6 +4,7 @@ set -euo pipefail
 
 OBSIDIAN="${OBSIDIAN:-$HOME/Documents/notes}"
 PEOPLE_DIR="${OBSIDIAN}/people"
+TEMPLATE="${TEMPLATE:-${OBSIDIAN}/templates/New Person.md}"
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
 LOG_FILE="${CACHE_DIR}/pg_pow.log"
 RSS_URL="https://postgresql.life/index.xml"
@@ -171,7 +172,7 @@ class ToMarkdown(HTMLParser):
             self._break()
             self.parts.append("-   ")
         elif tag == "a":
-            href = attrs.get("href", "")
+            href = attrs.get("href") or ""
             if href.startswith("/"):
                 href = "https://postgresql.life" + href
             elif href and not href.startswith(("http://", "https://", "mailto:")):
@@ -179,8 +180,8 @@ class ToMarkdown(HTMLParser):
             self.link_stack.append(href)
             self.parts.append("[")
         elif tag == "img":
-            src = attrs.get("src", "")
-            alt = attrs.get("alt", "")
+            src = attrs.get("src") or ""
+            alt = attrs.get("alt") or ""
             if src.startswith("/"):
                 src = "https://postgresql.life" + src
             elif src and not src.startswith("http"):
@@ -245,57 +246,44 @@ print(body)
 PY
 }
 
-split_name() {
-    local full="$1"
-    python3 - "$full" <<'PY'
-import sys
-parts = sys.argv[1].split(None, 1)
-print(parts[0])
-print(parts[1] if len(parts) > 1 else "")
-PY
-}
-
 build_note() {
     local name="$1" image="$2" body="$3"
-    local first last today
-    first=$(split_name "$name" | sed -n '1p')
-    last=$(split_name "$name" | sed -n '2p')
-    today=$(date +%Y-%m-%d)
+    [[ -f "$TEMPLATE" ]] || { echo "pg_pow: template not found: $TEMPLATE" >&2; exit 1; }
 
-    cat <<EOF
----
-first_name: ${first}
-middle_name: 
-last_name: ${last}
-street: 
-city: 
-state: 
-country: 
-zip: 
-phone: 
-home_email: 
-work_email: 
-birthday: 
-title: 
-tags: 
- - 🐘😇People
-company: 
-date: ${today}
-attention: false
-attention_from: 
-attention_until:
----
+    python3 - "$TEMPLATE" "$name" "$image" "$body" <<'PY'
+import sys
+from datetime import date
+from pathlib import Path
 
-![${name}|250](${image})
+template_path, name, image, body = sys.argv[1:5]
+text = Path(template_path).read_text(encoding="utf-8")
+today = date.today().isoformat()
+parts = name.split(None, 1)
+first = parts[0]
+last = parts[1] if len(parts) > 1 else ""
 
-\`\`\`dataview
-TABLE WITHOUT ID file.name as "full name", title, phone, work_email
-FROM "people"
-WHERE file.name = this.file.name
-\`\`\`
+out = []
+for line in text.splitlines():
+    if line.startswith("first_name:"):
+        out.append(f"first_name: {first}")
+    elif line.startswith("last_name:"):
+        out.append(f"last_name: {last}")
+    elif line.startswith("date:"):
+        out.append(f"date: {today}")
+    elif line.strip() == "- DRW":
+        continue
+    elif line.startswith("company:"):
+        out.append("company: ")
+    elif line == "![|250]()":
+        out.append(f"![{name}|250]({image})")
+    else:
+        out.append(line.replace("{{title}}", name).replace("{{date}}", today))
 
-${body}
-EOF
+note = "\n".join(out).rstrip()
+if body.strip():
+    note = f"{note}\n\n{body}"
+print(note)
+PY
 }
 
 mode="create"
