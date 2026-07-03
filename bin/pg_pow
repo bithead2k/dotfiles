@@ -272,6 +272,9 @@ for line in text.splitlines():
         out.append(f"date: {today}")
     elif line.strip() == "- DRW":
         continue
+    elif line.strip() == "- 🐘😇People":
+        out.append(line)
+        out.append(" - 🐘POW")
     elif line.startswith("company:"):
         out.append("company: ")
     elif line == "![|250]()":
