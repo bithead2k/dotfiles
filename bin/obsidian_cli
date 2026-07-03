@@ -224,4 +224,10 @@ function strip_crap() {
 [[ $action == 'new' ]] && [[ ! $silent == '' ]] && uri="${uri}&${silent}"
 [[ $action == 'new' ]] && [[ ! $content == '' ]] && uri="${uri}&content=${content}"
 
-/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=obsidian.sh --file-forwarding md.obsidian.Obsidian @@u $uri @@u 2>&1 | strip_crap
+if [[ -x /opt/Obsidian/obsidian ]]; then
+    /opt/Obsidian/obsidian "$uri" 2>&1 | strip_crap
+elif [[ -x /usr/bin/flatpak ]]; then
+    /usr/bin/flatpak run --branch=stable --arch=x86_64 --command=obsidian.sh --file-forwarding md.obsidian.Obsidian @@u $uri @@u 2>&1 | strip_crap
+else
+    xdg-open "$uri" 2>&1 | strip_crap
+fi
