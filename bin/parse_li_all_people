@@ -179,7 +179,7 @@ for name in "${PENDING[@]}"; do
         continue
     fi
 
-    read -r url source < <(python3 - "$note_file" "$name" "$POW" <<'PY'
+    IFS=$'\t' read -r url source < <(python3 - "$note_file" "$name" "$POW" <<'PY'
 import re, sys, urllib.parse, urllib.request
 from pathlib import Path
 
@@ -228,7 +228,7 @@ fm, body = parts(text)
 pow_tagged = pow_tag in fm
 urls = [clean_url(u) for u in LI.findall(body)]
 if urls:
-    print(urls[0], "body")
+    print(f"{urls[0]}\tbody")
     raise SystemExit(0)
 if pow_tagged:
     slug = slugify(name)
@@ -240,7 +240,7 @@ if pow_tagged:
         if "post-container" in page:
             live = [clean_url(u) for u in LI.findall(page)]
             if live:
-                print(live[0], "postgresql.life")
+                print(f"{live[0]}\tpostgresql.life")
                 raise SystemExit(0)
     except Exception:
         pass
@@ -248,6 +248,13 @@ company_m = re.search(r"^company:\s*(.*)$", fm, re.M)
 title_m = re.search(r"^title:\s*(.*)$", fm, re.M)
 company = (company_m.group(1).strip() if company_m else "").replace("[[", "").replace("]]", "")
 title = title_m.group(1).strip() if title_m else ""
+pause = Path("/tmp/parse_li_brave_pause")
+if pause.exists():
+    import time as _time
+    if _time.time() - pause.stat().st_mtime < 3600 and pause.read_text().strip():
+        print(f"\tsearch_paused")
+        raise SystemExit(0)
+    pause.unlink(missing_ok=True)
 q = f'"{name}" {company or "PostgreSQL"} linkedin site:linkedin.com/in'
 try:
     html = brave_search(q)
@@ -255,20 +262,23 @@ try:
     scored = [(score_match(name, u, company, title), u) for u in found[:8]]
     strong = [x for x in scored if x[0] >= 90]
     if len(strong) == 1:
-        print(strong[0][1], "search")
+        print(f"{strong[0][1]}\tsearch")
         raise SystemExit(0)
     if len(strong) > 1:
-        print("", "search_ambiguous")
+        print(f"\tsearch_ambiguous")
         raise SystemExit(0)
 except Exception as exc:
-    print("", f"search_error:{exc}")
+    msg = str(exc)
+    if "429" in msg:
+        pause.write_text(msg, encoding="utf-8")
+    print(f"\tsearch_error:{msg}")
     raise SystemExit(0)
-print("", "search_none")
+print(f"\tsearch_none")
 PY
 )
 
-    if [[ -z "$url" ]]; then
-        log "no match ${name} (${source})"
+    if [[ -z "$url" || "$url" != http*linkedin.com/in/* ]]; then
+        log "no match ${name} (${source:-unknown})"
         ((skip++)) || true
         sleep_jitter
         continue
