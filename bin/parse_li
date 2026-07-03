@@ -1846,7 +1846,14 @@ def resolve_people_page(profile_name, profile_slug, people_dir):
 
 
 people_dir = Path(obsidian) / "people"
-outfile, outfile_reason = resolve_people_page(name, slug, people_dir)
+forced_person = os.environ.get("OBSIDIAN_PERSON", "").strip()
+if forced_person:
+    forced_path = people_dir / f"{forced_person}.md"
+    if not forced_path.exists():
+        raise SystemExit(f"OBSIDIAN_PERSON file not found: {forced_path}")
+    outfile, outfile_reason = forced_path, "OBSIDIAN_PERSON override"
+else:
+    outfile, outfile_reason = resolve_people_page(name, slug, people_dir)
 safe_name = outfile.stem
 
 if not safe_name:
@@ -1917,6 +1924,9 @@ if outfile.exists():
 
     body = update_body_profile_picture(body, photo_asset)
     outfile.write_text(render_frontmatter(merged_fm, order) + body)
+    _alias_helper = Path.home() / "bin" / "obsidian_ensure_filename_alias"
+    if _alias_helper.is_file():
+        subprocess.run([str(_alias_helper), str(outfile)], check=False)
 
 else:
     body = "\n".join([
@@ -1932,6 +1942,9 @@ else:
 
     merged_fm = apply_surgical_merge({}, new_fm, is_new=True, canonical_name=outfile.stem)
     outfile.write_text(render_frontmatter(merged_fm, default_order) + body)
+    _alias_helper = Path.home() / "bin" / "obsidian_ensure_filename_alias"
+    if _alias_helper.is_file():
+        subprocess.run([str(_alias_helper), str(outfile)], check=False)
 
 print(outfile)
 
