@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Queue an in-Obsidian metadata cache rebuild for PostgreSQL POW people notes.
+set -euo pipefail
+
+OBSIDIAN="${OBSIDIAN:-$HOME/Documents/notes}"
+REFRESH_NOTE="${OBSIDIAN}/reference/Refresh POW metadata.md"
+OBSIDIAN_CLI="${OBSIDIAN_CLI:-$HOME/bin/obsidian_cli}"
+
+if [[ ! -f "$REFRESH_NOTE" ]]; then
+    echo "obsidian_refresh_people_metadata: missing $REFRESH_NOTE" >&2
+    exit 1
+fi
+
+python3 - "$REFRESH_NOTE" <<'PY'
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+if not text.startswith("---\n"):
+    raise SystemExit("refresh note has no frontmatter")
+
+end = text.find("\n---\n", 4)
+if end == -1:
+    raise SystemExit("refresh note frontmatter not closed")
+
+fm, body = text[4:end], text[end + 5 :]
+lines = fm.splitlines()
+out = []
+seen = {"run_refresh": False, "last_refresh": False}
+for line in lines:
+    if line.startswith("run_refresh:"):
+        out.append("run_refresh: true")
+        seen["run_refresh"] = True
+        continue
+    if line.startswith("last_refresh:"):
+        out.append(f"last_refresh: {stamp}")
+        seen["last_refresh"] = True
+        continue
+    out.append(line)
+if not seen["run_refresh"]:
+    out.append("run_refresh: true")
+if not seen["last_refresh"]:
+    out.append(f"last_refresh: {stamp}")
+
+path.write_text(f"---\n" + "\n".join(out) + f"\n---\n{body}", encoding="utf-8")
+print(f"obsidian_refresh_people_metadata: flagged refresh ({stamp})")
+PY
+
+# Nudge Obsidian's filesystem watcher for people notes edited outside the app.
+if [[ -d "${OBSIDIAN}/people" ]]; then
+    find "${OBSIDIAN}/people" -name "*.md" -type f -exec touch {} +
+fi
+
+if [[ -x "$OBSIDIAN_CLI" ]]; then
+    "$OBSIDIAN_CLI" -of "reference/Refresh POW metadata" || true
+else
+    echo "obsidian_refresh_people_metadata: open reference/Refresh POW metadata in Obsidian"
+fi
+
+cat <<'EOF'
+
+Next steps (Obsidian must be running):
+  1. This note should open automatically.
+  2. If the dataviewjs block did not run, reload the note (close and reopen).
+  3. Wait for "Metadata refresh complete".
+  4. Re-open reference/People - PostgreSQL.md.
+
+If results are still stale: Command Palette → "Reload app without saving"
+or Settings → Files and links → Rebuild.
+EOF
