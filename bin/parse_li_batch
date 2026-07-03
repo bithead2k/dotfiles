@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Throttled batch LinkedIn import via parse_li.
+set -euo pipefail
+
+BIN="${BIN:-$HOME/bin/parse_li}"
+TSV="${1:-/tmp/pg_people_li_remaining.tsv}"
+LOG="${LOG:-$HOME/.cache/parse_li_batch.log}"
+BASE_DELAY="${BASE_DELAY:-180}"   # seconds between requests
+JITTER="${JITTER:-12}"            # +/- seconds of irregular variance
+
+usage() {
+    cat <<EOF
+Usage: parse_li_batch [candidates.tsv]
+
+Run parse_li for each name/URL pair in the TSV (name<TAB>url).
+Waits ~${BASE_DELAY}s between requests with +/- ${JITTER}s jitter.
+
+Environment:
+  OBSIDIAN, BIN, LOG, BASE_DELAY, JITTER
+EOF
+}
+
+log() {
+    mkdir -p "$(dirname "$LOG")"
+    printf '%s %s\n' "$(date -Iseconds)" "$*" | tee -a "$LOG"
+}
+
+sleep_jitter() {
+    local jitter max min wait
+    jitter=$((RANDOM % (JITTER * 2 + 1) - JITTER))
+    wait=$((BASE_DELAY + jitter))
+    ((wait < 30)) && wait=30
+    log "sleeping ${wait}s before next request (base=${BASE_DELAY}, jitter=${jitter})"
+    sleep "$wait"
+}
+
+[[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+[[ -f "$TSV" ]] || { echo "parse_li_batch: file not found: $TSV" >&2; exit 1; }
+command -v "$BIN" >/dev/null || { echo "parse_li_batch: missing $BIN" >&2; exit 1; }
+
+ok=0
+fail=0
+total=$(grep -c . "$TSV" || true)
+log "starting batch: ${total} candidates from ${TSV}"
+
+while IFS=$'\t' read -r name url; do
+    [[ -z "$name" || -z "$url" ]] && continue
+    log "processing ${name} -> ${url}"
+    if OBSIDIAN_PERSON="$name" "$BIN" "$url" >>"$LOG" 2>&1; then
+        out=$(tail -1 "$LOG")
+        if [[ "$out" == *"/people/${name}.md" ]]; then
+            log "OK ${name}"
+            ((ok++)) || true
+        else
+            log "WRONG_FILE ${name} -> ${out}"
+            ((fail++)) || true
+        fi
+    else
+        log "FAIL ${name} (exit $?)"
+        ((fail++)) || true
+    fi
+    sleep_jitter
+done <"$TSV"
+
+log "batch complete: ok=${ok} fail=${fail}"
+echo "parse_li_batch: ok=${ok} fail=${fail} (log: ${LOG})"
