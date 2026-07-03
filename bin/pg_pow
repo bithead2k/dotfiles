@@ -1,30 +1,357 @@
-#!/bin/bash
-set -x
-#Attempt to get the PostgreSQL Person of the Week from Andreas Sherbaum
-newperson=${*:-$(xclip -o)} # from the command line or the clipboard
-person=${newperson,,}  # bash lowercase
-person=${person// /_}  # spaces to underscores
-person=$(echo $person | recode -f utf8..flat)
-wget https://postgresql.life/post/${person}/ -q -O- |
-    sed -e 's/<h3 /\n<h3 /g' -e 's/class=slonik-with-text/\n/g' |
-    sed -e '1,/Read all interviews/d' -e '/elephant_03/,$d' | 
-    sed -e 's_img src=/images_img src=http://postgresql.life/images_g' |
-    xclip -selection clipboard -t text/html
-~/bin/obsidian_cli -of "people/${newperson}"
-xdotool key Down G End A Return Return ctrl+v
-xdotool key Escape  # Command mode
-xdotool key colon g slash c o m p a n y slash s slash T i m e s c a l e slash slash Return
-# xdotool key colon
-xdotool type ':%s/i---/---/'
-xdotool key Return
-# g/^\!\[/s/\]/|250]/
-xdotool key colon g slash ^ backslash exclam backslash bracketleft slash s slash backslash bracketright slash bar 2 5 0 bracketright slash Return
-xdotool type ':g/- 🐯timescale/d'
-xdotool key Return
-# xdotool key colon Up Up Up Up Return
-xdotool key slash exclam backslash bracketleft
-xdotool type "$newperson"
-xdotool key Return
-xdotool key d d
-xdotool key slash 2 5 0 bar 2 5 0 Return Escape p Up d d
+#!/usr/bin/env bash
+# PostgreSQL Person of the Week — fetch interviews from postgresql.life
+set -euo pipefail
 
+OBSIDIAN="${OBSIDIAN:-$HOME/Documents/notes}"
+PEOPLE_DIR="${OBSIDIAN}/people"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
+LOG_FILE="${CACHE_DIR}/pg_pow.log"
+RSS_URL="https://postgresql.life/index.xml"
+BASE_URL="https://postgresql.life"
+
+usage() {
+    cat <<'EOF'
+Usage: pg_pow [options] [name-or-slug]
+
+Fetch a PostgreSQL Person of the Week interview from postgresql.life and
+create or update a people note in the Obsidian vault.
+
+Options:
+  --latest       Use the newest RSS entry (for cron; skips if note exists)
+  --markdown     Print note body to stdout (image + interview); no vault write
+  --open         Open the note in Obsidian after creating (default for manual use)
+  --quiet        No Obsidian URI; log only (implied by --latest in cron)
+  -h, --help     Show this help
+
+With no arguments, reads a name from the clipboard (xclip).
+EOF
+}
+
+log() {
+    mkdir -p "$(dirname "$LOG_FILE")"
+    printf '%s pg_pow: %s\n' "$(date -Iseconds)" "$*" >>"$LOG_FILE"
+}
+
+resolve_person() {
+    local query="${1:-}"
+    python3 - "$query" "$RSS_URL" <<'PY'
+import re
+import sys
+import urllib.request
+
+query, rss_url = sys.argv[1], sys.argv[2]
+
+def fetch(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "pg_pow/2.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8")
+
+def slugify(name):
+    s = name.strip().lower()
+    s = re.sub(r"[^\w\s-]", "", s, flags=re.UNICODE)
+    return re.sub(r"[\s-]+", "_", s)
+
+items = []
+for block in re.findall(r"<item>(.*?)</item>", fetch(rss_url), re.DOTALL):
+    title_m = re.search(r"<title>([^<]+)</title>", block)
+    link_m = re.search(r"<link>([^<]+)</link>", block)
+    if title_m and link_m:
+        link = link_m.group(1).strip()
+        slug = link.rstrip("/").split("/")[-1]
+        items.append((title_m.group(1).strip(), slug, link))
+
+if not items:
+    raise SystemExit("pg_pow: no interviews in RSS feed")
+
+if not query or query == "--latest":
+    title, slug, link = items[0]
+    print(f"{title}\t{slug}\t{link}")
+    raise SystemExit(0)
+
+q = query.strip()
+q_slug = slugify(q)
+
+for title, slug, link in items:
+    if q_slug == slug or q.lower() == title.lower():
+        print(f"{title}\t{slug}\t{link}")
+        raise SystemExit(0)
+
+if re.match(r"^[\w_]+$", q):
+    url = f"https://postgresql.life/post/{q_slug}/"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "pg_pow/2.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status == 200:
+                page = resp.read().decode("utf-8", errors="replace")
+                title_m = re.search(r"<h1>([^<]+)</h1>", page)
+                title = title_m.group(1).strip() if title_m else q.replace("_", " ").title()
+                print(f"{title}\t{q_slug}\t{url}")
+                raise SystemExit(0)
+    except Exception:
+        pass
+
+names = ", ".join(t for t, _, _ in items[:5])
+raise SystemExit(f"pg_pow: no match for {query!r} (recent: {names})")
+PY
+}
+
+fetch_markdown() {
+    local link="$1"
+    python3 - "$link" <<'PY'
+import html
+import re
+import sys
+import urllib.request
+from html.parser import HTMLParser
+
+link = sys.argv[1]
+base = link if link.endswith("/") else link + "/"
+
+def fetch(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "pg_pow/2.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+def head_ok(url):
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "pg_pow/2.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= resp.status < 400
+    except Exception:
+        return False
+
+def resolve_image(slug, page):
+    og_m = re.search(r'property="og:image:url" content="([^"]+)"', page)
+    candidates = []
+    if og_m:
+        candidates.append(og_m.group(1))
+    candidates.extend(
+        [
+            f"https://postgresql.life/images/posts/{slug}_600.jpg",
+            f"https://postgresql.life/post/{slug}/{slug}_600.jpg",
+            f"https://postgresql.life/post/{slug}/{slug}.jpg",
+        ]
+    )
+    seen = set()
+    for url in candidates:
+        if url in seen:
+            continue
+        seen.add(url)
+        if head_ok(url):
+            return url
+    return candidates[0]
+
+class ToMarkdown(HTMLParser):
+    def __init__(self, base_url):
+        super().__init__(convert_charrefs=True)
+        self.base = base_url
+        self.parts = []
+        self.link_stack = []
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if self.skip:
+            self.skip += 1
+            return
+        if tag in ("script", "style"):
+            self.skip = 1
+            return
+        if tag == "h3":
+            self._break()
+            self.parts.append("### ")
+        elif tag == "h4":
+            self._break()
+            self.parts.append("#### ")
+        elif tag == "p":
+            self._break()
+        elif tag == "br":
+            self.parts.append("\n")
+        elif tag == "li":
+            self._break()
+            self.parts.append("-   ")
+        elif tag == "a":
+            href = attrs.get("href", "")
+            if href.startswith("/"):
+                href = "https://postgresql.life" + href
+            elif href and not href.startswith(("http://", "https://", "mailto:")):
+                href = self.base + href.lstrip("/")
+            self.link_stack.append(href)
+            self.parts.append("[")
+        elif tag == "img":
+            src = attrs.get("src", "")
+            alt = attrs.get("alt", "")
+            if src.startswith("/"):
+                src = "https://postgresql.life" + src
+            elif src and not src.startswith("http"):
+                src = self.base + src.lstrip("/")
+            self.parts.append(f"![{alt}]({src})")
+        elif tag == "figcaption":
+            self._break()
+            self.parts.append("#### ")
+
+    def handle_endtag(self, tag):
+        if self.skip:
+            self.skip -= 1
+            return
+        if tag in ("h3", "h4", "figcaption"):
+            self.parts.append("\n\n")
+        elif tag == "p":
+            self.parts.append("\n\n")
+        elif tag == "li":
+            self.parts.append("\n")
+        elif tag == "a":
+            if self.link_stack:
+                href = self.link_stack.pop()
+                self.parts.append(f"]({href})")
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.parts.append(data)
+
+    def _break(self):
+        if self.parts and not self.parts[-1].endswith("\n"):
+            self.parts.append("\n")
+
+    def get_markdown(self):
+        text = "".join(self.parts)
+        text = html.unescape(text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+page = fetch(link)
+title_m = re.search(r"<h1>([^<]+)</h1>", page)
+title = title_m.group(1).strip() if title_m else ""
+slug = link.rstrip("/").split("/")[-1]
+image = resolve_image(slug, page)
+
+m = re.search(
+    r"<div class=post-container>(.*?)</div>\s*<br><br>\s*<a class=resp-sharing",
+    page,
+    re.DOTALL,
+)
+if not m:
+    m = re.search(r"<div class=post-container>(.*?)</div>", page, re.DOTALL)
+container = m.group(1) if m else ""
+
+parser = ToMarkdown(base)
+parser.feed(container)
+body = parser.get_markdown()
+
+print(f"TITLE:{title}")
+print(f"IMAGE:{image}")
+print("BODY:")
+print(body)
+PY
+}
+
+split_name() {
+    local full="$1"
+    python3 - "$full" <<'PY'
+import sys
+parts = sys.argv[1].split(None, 1)
+print(parts[0])
+print(parts[1] if len(parts) > 1 else "")
+PY
+}
+
+build_note() {
+    local name="$1" image="$2" body="$3"
+    local first last today
+    first=$(split_name "$name" | sed -n '1p')
+    last=$(split_name "$name" | sed -n '2p')
+    today=$(date +%Y-%m-%d)
+
+    cat <<EOF
+---
+first_name: ${first}
+middle_name: 
+last_name: ${last}
+street: 
+city: 
+state: 
+country: 
+zip: 
+phone: 
+home_email: 
+work_email: 
+birthday: 
+title: 
+tags: 
+ - 🐘😇People
+company: 
+date: ${today}
+attention: false
+attention_from: 
+attention_until:
+---
+
+![${name}|250](${image})
+
+\`\`\`dataview
+TABLE WITHOUT ID file.name as "full name", title, phone, work_email
+FROM "people"
+WHERE file.name = this.file.name
+\`\`\`
+
+${body}
+EOF
+}
+
+mode="create"
+query=""
+open_obsidian=1
+quiet=0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --latest) query="--latest" ;;
+        --markdown) mode="markdown" ;;
+        --open) open_obsidian=1 ;;
+        --quiet) quiet=1; open_obsidian=0 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) echo "pg_pow: unknown option $1" >&2; usage >&2; exit 1 ;;
+        *) query="$1" ;;
+    esac
+    shift
+done
+
+if [[ -z "$query" ]]; then
+    if command -v xclip >/dev/null 2>&1; then
+        query=$(xclip -o 2>/dev/null | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    fi
+    [[ -z "$query" ]] && { echo "pg_pow: provide a name or use --latest" >&2; usage >&2; exit 1; }
+fi
+
+[[ "$query" == "--latest" ]] && quiet=1 && open_obsidian=0
+
+IFS=$'\t' read -r person_name slug person_link < <(resolve_person "$query")
+
+parsed=$(fetch_markdown "$person_link")
+note_image=$(printf '%s\n' "$parsed" | sed -n 's/^IMAGE://p' | head -1)
+note_body=$(printf '%s\n' "$parsed" | awk 'found{print} /^BODY:$/{found=1}')
+resolved_title=$(printf '%s\n' "$parsed" | sed -n 's/^TITLE://p' | head -1)
+[[ -n "$resolved_title" ]] && person_name="$resolved_title"
+
+if [[ "$mode" == "markdown" ]]; then
+    build_note "$person_name" "$note_image" "$note_body"
+    exit 0
+fi
+
+note_file="${PEOPLE_DIR}/${person_name}.md"
+if [[ -f "$note_file" ]]; then
+    log "skip existing note: ${person_name}"
+    [[ "$quiet" -eq 0 ]] && echo "pg_pow: ${note_file} already exists"
+    exit 0
+fi
+
+mkdir -p "$PEOPLE_DIR"
+build_note "$person_name" "$note_image" "$note_body" >"$note_file"
+obsidian_ensure_filename_alias "$note_file"
+log "created ${person_name} (${person_link})"
+
+if [[ "$open_obsidian" -eq 1 ]]; then
+    obsidian_cli -of "people/${person_name}"
+fi
+
+echo "pg_pow: created ${note_file}"

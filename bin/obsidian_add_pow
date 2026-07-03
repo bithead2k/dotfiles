@@ -1,24 +1,9 @@
-#!/bin/bash
-#===============================================================================
-#
-#          FILE:  obsidian_add_pow
-# 
-#         USAGE:  ./obsidian_add_pow 
-# 
-#   DESCRIPTION:  Add the Person of the Week to a person profile
-# 
-#       OPTIONS:  ---
-#  REQUIREMENTS:  ---
-#          BUGS:  ---
-#         NOTES:  ---
-#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
-#       COMPANY:  Timescale
-#       VERSION:  1.0
-#       CREATED:  03/29/2023 10:51:25 AM CDT
-#      REVISION:  ---
-#===============================================================================
+#!/usr/bin/env bash
+# Add PostgreSQL Person of the Week interview content to a people note.
+set -euo pipefail
 
-person="${@:-$(xclip -o)}"
-pow=$(/home/kroybal/bin/pg_pow "$person")
-pow=$(xclip -o)
-/home/kroybal/bin/obsidian_cli -naf "people/${person}" -t "${pow}"
+person="${*:-$(xclip -o 2>/dev/null | head -1)}"
+[[ -z "$person" ]] && { echo "obsidian_add_pow: provide a name" >&2; exit 1; }
+
+pow=$(pg_pow --markdown "$person")
+obsidian_cli -naf "people/${person}" -t "${pow}"
