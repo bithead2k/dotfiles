@@ -45,6 +45,12 @@ log "starting batch: ${total} candidates from ${TSV}"
 
 while IFS=$'\t' read -r name url; do
     [[ -z "$name" || -z "$url" ]] && continue
+    note_file="${OBSIDIAN:-$HOME/Documents/notes}/people/${name}.md"
+    if [[ -f "$note_file" ]] && grep -qE '^linkedin:\s*https?://' "$note_file"; then
+        log "skip already linked ${name}"
+        ((ok++)) || true
+        continue
+    fi
     log "processing ${name} -> ${url}"
     if OBSIDIAN_PERSON="$name" "$BIN" "$url" >>"$LOG" 2>&1; then
         out=$(tail -1 "$LOG")
