@@ -20,8 +20,8 @@ create or update a people note in the Obsidian vault.
 
 Options:
   --latest       Use the newest RSS entry (for cron; skips if note exists)
-  --backfill     Walk the full interview archive: create missing notes and
-                 add the 🐘POW tag to existing ones when absent
+  --backfill     Walk the full interview archive; surgically create or update
+                 notes (tags, image, interview) without overwriting populated fields
   --markdown     Print note body to stdout (image + interview); no vault write
   --open         Open the note in Obsidian after creating (default for manual use)
   --quiet        No Obsidian URI; log only (implied by --latest and --backfill)
@@ -90,17 +90,22 @@ if not query or query == "--latest":
 
 q = query.strip()
 q_slug = slugify(q)
+slug_candidates = []
+for candidate in (q.lower().replace(" ", "_"), q_slug, re.sub(r"[\s-]+", "_", q.lower())):
+    if candidate and candidate not in slug_candidates:
+        slug_candidates.append(candidate)
 
 for title, slug, link in items:
-    if q_slug == slug or q.lower() == title.lower():
+    if q.lower() == title.lower() or q_slug == slug or q.lower().replace(" ", "_") == slug:
         print(f"{title}\t{slug}\t{link}")
         raise SystemExit(0)
 
-resolved = resolve_slug(q_slug)
-if resolved:
-    title, slug, link = resolved
-    print(f"{title}\t{slug}\t{link}")
-    raise SystemExit(0)
+for candidate in slug_candidates:
+    resolved = resolve_slug(candidate)
+    if resolved:
+        title, slug, link = resolved
+        print(f"{title}\t{slug}\t{link}")
+        raise SystemExit(0)
 
 names = ", ".join(t for t, _, _ in items[:5])
 raise SystemExit(f"pg_pow: no match for {query!r} (recent: {names})")
@@ -291,157 +296,356 @@ parse_fetched() {
     PARSED_BODY=$(printf '%s\n' "$parsed" | awk 'found{print} /^BODY:$/{found=1}')
 }
 
-ensure_pow_tag() {
-    local file="$1"
-    python3 - "$file" "$POW_TAG" <<'PY'
+apply_pow_note() {
+    local mode="$1" person_name="$2" person_link="$3" image="$4"
+    local interview_file note_file result
+    interview_file=$(mktemp)
+    note_file="${PEOPLE_DIR}/${person_name}.md"
+    trap 'rm -f "$interview_file"' RETURN
+    printf '%s\n' "$5" >"$interview_file"
+
+    [[ -f "$TEMPLATE" ]] || { echo "pg_pow: template not found: $TEMPLATE" >&2; return 1; }
+
+    result=$(python3 - "$note_file" "$TEMPLATE" "$person_name" "$image" "$interview_file" "$person_link" "$mode" "$POW_TAG" <<'PY'
 import re
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-pow_tag = sys.argv[2]
-text = path.read_text(encoding="utf-8")
-
-if not text.startswith("---\n"):
-    raise SystemExit(1)
-
-end = text.find("\n---\n", 4)
-if end == -1:
-    raise SystemExit(1)
-
-fm, body = text[4:end], text[end + 5 :]
-if pow_tag in fm:
-    raise SystemExit(1)
-
-lines = fm.splitlines()
-out = []
-modified = False
-i = 0
-while i < len(lines):
-    line = lines[i]
-    if line.startswith("tags:"):
-        out.append(line)
-        i += 1
-        tag_lines = []
-        while i < len(lines) and re.match(r"^\s*-\s+", lines[i]):
-            tag_lines.append(lines[i])
-            i += 1
-        out.extend(tag_lines)
-        if not any(pow_tag in tl for tl in tag_lines):
-            out.append(f" - {pow_tag}")
-            modified = True
-        continue
-    out.append(line)
-    i += 1
-
-if not modified:
-    inserted = False
-    rebuilt = []
-    for line in out:
-        if not inserted and line.startswith(("date:", "company:", "attention:", "aliases:")):
-            rebuilt.extend(["tags:", f" - {pow_tag}", ""])
-            inserted = True
-            modified = True
-        rebuilt.append(line)
-    if not inserted:
-        rebuilt.extend(["tags:", f" - {pow_tag}"])
-        modified = True
-    out = rebuilt
-
-if not modified:
-    raise SystemExit(1)
-
-path.write_text("---\n" + "\n".join(out) + "\n---\n" + body, encoding="utf-8")
-raise SystemExit(0)
-PY
-}
-
-build_note() {
-    local name="$1" image="$2" body="$3"
-    [[ -f "$TEMPLATE" ]] || { echo "pg_pow: template not found: $TEMPLATE" >&2; exit 1; }
-
-    python3 - "$TEMPLATE" "$name" "$image" "$body" "$POW_TAG" <<'PY'
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
 
-template_path, name, image, body, pow_tag = sys.argv[1:6]
-text = Path(template_path).read_text(encoding="utf-8")
-today = date.today().isoformat()
+note_path = Path(sys.argv[1])
+template_path = Path(sys.argv[2])
+name = sys.argv[3]
+image = sys.argv[4]
+interview_path = Path(sys.argv[5])
+interview_url = sys.argv[6]
+mode = sys.argv[7]
+pow_tag = sys.argv[8]
+people_tag = "🐘😇People"
+template_strip_tags = {"DRW"}
+interview_marker = "### Please tell us about yourself"
+interview_text = interview_path.read_text(encoding="utf-8").strip()
+
 parts = name.split(None, 1)
-first = parts[0]
-last = parts[1] if len(parts) > 1 else ""
+incoming_name = {
+    "first_name": parts[0],
+    "middle_name": "",
+    "last_name": parts[1] if len(parts) > 1 else "",
+}
 
-out = []
-for line in text.splitlines():
-    if line.startswith("first_name:"):
-        out.append(f"first_name: {first}")
-    elif line.startswith("last_name:"):
-        out.append(f"last_name: {last}")
-    elif line.startswith("date:"):
-        out.append(f"date: {today}")
-    elif line.strip() == "- DRW":
-        continue
-    elif line.strip() == "- 🐘😇People":
-        out.append(line)
-        out.append(f" - {pow_tag}")
-    elif line.startswith("company:"):
-        out.append("company: ")
-    elif line == "![|250]()":
-        out.append(f"![{name}|250]({image})")
+
+def yaml_scalar(value):
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(x).strip() for x in value if str(x).strip())
+    return str(value).strip()
+
+
+def parse_frontmatter(text):
+    m = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
+    if not m:
+        return {}, [], text
+    fm_text = m.group(1)
+    body = text[m.end() :]
+    data = {}
+    order = []
+    current_key = None
+    for line in fm_text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith((" ", "\t")) and current_key:
+            data[current_key] = (data.get(current_key, "") + "\n" + line.rstrip()).strip("\n")
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        data[key] = value.strip()
+        order.append(key)
+        current_key = key
+    return data, order, body
+
+
+def render_frontmatter(data, order):
+    seen = set()
+    lines = ["---"]
+    for key in order:
+        if key in data and key not in seen:
+            value = data.get(key, "")
+            if "\n" in value:
+                lines.append(f"{key}:")
+                lines.extend(value.splitlines())
+            else:
+                lines.append(f"{key}: {value}" if yaml_scalar(value) else f"{key}: ")
+            seen.add(key)
+    for key, value in data.items():
+        if key not in seen:
+            if "\n" in value:
+                lines.append(f"{key}:")
+                lines.extend(value.splitlines())
+            else:
+                lines.append(f"{key}: {value}" if yaml_scalar(value) else f"{key}: ")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def parse_tag_items(value):
+    items = []
+    if isinstance(value, list):
+        raw = value
     else:
-        out.append(line.replace("{{title}}", name).replace("{{date}}", today))
+        raw = yaml_scalar(value).splitlines() if "\n" in yaml_scalar(value) else re.split(r"[,;]", yaml_scalar(value))
+    for item in raw:
+        item = re.sub(r"^\s*-\s*", "", yaml_scalar(item)).strip()
+        if item and item not in items:
+            items.append(item)
+    return items
 
-note = "\n".join(out).rstrip()
-if body.strip():
-    note = f"{note}\n\n{body}"
-print(note)
+
+def render_tags(items, *, prefer_list=False):
+    cleaned = []
+    seen = set()
+    for item in items:
+        item = yaml_scalar(item)
+        if not item or item in seen:
+            continue
+        cleaned.append(item)
+        seen.add(item)
+    if not cleaned:
+        return ""
+    if prefer_list or len(cleaned) > 1:
+        return "\n".join(f"  - {item}" for item in cleaned)
+    return cleaned[0]
+
+
+def ensure_tags(existing, *required):
+    items = parse_tag_items(existing)
+    for tag in required:
+        if tag not in items:
+            items.append(tag)
+    return items
+
+
+def merge_aliases(existing, canonical_name):
+    vals = []
+    for alias in parse_tag_items(existing):
+        if alias and alias not in vals:
+            vals.append(alias)
+    canonical_key = re.sub(r"\s+", " ", canonical_name).strip().casefold()
+    vals = [a for a in vals if re.sub(r"\s+", " ", a).strip().casefold() != canonical_key]
+    return render_tags(vals, prefer_list=True) if vals else ""
+
+
+def merge_pow_frontmatter(old, order, *, is_new, canonical_name):
+    merged = dict(old)
+    if is_new:
+        merged.pop("tags", None)
+        if yaml_scalar(merged.get("company", "")) in ("DRW", "[[companies/DRW]]"):
+            merged.pop("company", None)
+
+    today = date.today().isoformat()
+    for key, value in incoming_name.items():
+        value = yaml_scalar(value)
+        if is_new:
+            merged[key] = value
+        elif not yaml_scalar(merged.get(key, "")):
+            merged[key] = value
+
+    if is_new and not yaml_scalar(merged.get("date", "")):
+        merged["date"] = today
+
+    old_tags = parse_tag_items(merged.get("tags", ""))
+    new_tags = ensure_tags(merged.get("tags", ""), people_tag, pow_tag)
+    if new_tags != old_tags:
+        merged["tags"] = render_tags(new_tags, prefer_list=True)
+
+    if is_new:
+        merged["aliases"] = merge_aliases(merged.get("aliases", ""), canonical_name)
+
+    for key in incoming_name:
+        if key not in order:
+            order.append(key)
+    if "tags" not in order:
+        order.append("tags")
+    if is_new and "date" in merged and "date" not in order:
+        order.append("date")
+    return merged, order
+
+
+def has_interview(body):
+    if interview_marker in body:
+        return True
+    if "postgresql.life/post/" in body:
+        return True
+    if interview_url and interview_url.rstrip("/") in body:
+        return True
+    return False
+
+
+def first_image_line(body):
+    return re.search(r"(?m)^!\[[^\]\n]*\]\([^)\n]*\)\s*$", body)
+
+
+def is_placeholder_image(line):
+    m = re.match(r"^!\[([^\]]*)\]\(([^)]*)\)\s*$", line)
+    if not m:
+        return False
+    alt, url = m.group(1).strip(), m.group(2).strip()
+    if not url:
+        return True
+    if url.startswith("assets/"):
+        return False
+    if "postgresql.life" in url:
+        return False
+    return alt in ("", "|250")
+
+
+def update_header_image(body, header_line):
+    m = first_image_line(body)
+    if not m:
+        return header_line + "\n\n" + body.lstrip("\n")
+    line = m.group(0)
+    if is_placeholder_image(line):
+        start, end = m.span()
+        return body[:start] + header_line + body[end:]
+    return body
+
+
+def append_interview(body, text):
+    if not text:
+        return body
+    dv = re.search(r"```dataview.*?```", body, re.S)
+    if dv:
+        insert_at = dv.end()
+        chunk = body[insert_at:]
+        if chunk.startswith("\r\n"):
+            insert_at += 2
+        elif chunk.startswith("\n"):
+            insert_at += 1
+        return body[:insert_at] + "\n\n" + text + "\n" + chunk.lstrip("\n")
+    img = first_image_line(body)
+    if img:
+        insert_at = img.end()
+        chunk = body[insert_at:]
+        if chunk.startswith("\r\n"):
+            insert_at += 2
+        elif chunk.startswith("\n"):
+            insert_at += 1
+        return body[:insert_at] + "\n\n" + text + "\n" + chunk.lstrip("\n")
+    sep = "\n\n" if body.strip() else ""
+    return body.rstrip() + sep + text + "\n"
+
+
+def default_body(header_line):
+    return "\n".join(
+        [
+            header_line,
+            "",
+            "```dataview",
+            'TABLE WITHOUT ID file.name as "full name", title, phone, work_email',
+            'FROM "people"',
+            "WHERE file.name = this.file.name",
+            "```",
+            "",
+        ]
+    )
+
+
+def load_page():
+    if note_path.exists():
+        return parse_frontmatter(note_path.read_text(encoding="utf-8", errors="replace")) + (False,)
+    text = template_path.read_text(encoding="utf-8", errors="replace")
+    text = text.replace("{{title}}", name).replace("{{date}}", date.today().isoformat())
+    return parse_frontmatter(text) + (True,)
+
+
+data, order, body, is_new = load_page()
+canonical = note_path.stem
+header_line = f"![{name}|250]({image})"
+
+body_before = body
+tags_before = set(parse_tag_items(data.get("tags", "")))
+
+merged, order = merge_pow_frontmatter(data, order, is_new=is_new, canonical_name=canonical)
+body = update_header_image(body, header_line)
+if interview_text and not has_interview(body):
+    body = append_interview(body, interview_text)
+elif is_new and not body.strip():
+    body = default_body(header_line)
+    if interview_text:
+        body = append_interview(body, interview_text)
+
+tags_after = set(parse_tag_items(merged.get("tags", "")))
+names_filled = any(
+    not yaml_scalar(data.get(key, "")) and yaml_scalar(merged.get(key, ""))
+    for key in incoming_name
+)
+changed = is_new or body != body_before or tags_before != tags_after or names_filled
+status = "created" if is_new else ("updated" if changed else "unchanged")
+note = render_frontmatter(merged, order) + body.lstrip("\n")
+
+if mode == "markdown":
+    print(note, end="")
+    raise SystemExit(0)
+
+if status == "unchanged":
+    print(f"STATUS:unchanged")
+    raise SystemExit(0)
+
+note_path.parent.mkdir(parents=True, exist_ok=True)
+note_path.write_text(note, encoding="utf-8")
+if is_new:
+    helper = Path.home() / "bin" / "obsidian_ensure_filename_alias"
+    if helper.is_file():
+        subprocess.run([str(helper), str(note_path)], check=False)
+print(f"STATUS:{status}")
 PY
-}
+)
 
-create_person_note() {
-    local person_name="$1" person_link="$2"
-    local note_file="${PEOPLE_DIR}/${person_name}.md"
-
-    mkdir -p "$PEOPLE_DIR"
-    build_note "$person_name" "$PARSED_IMAGE" "$PARSED_BODY" >"$note_file"
-    obsidian_ensure_filename_alias "$note_file"
-    log "created ${person_name} (${person_link})"
-    echo "pg_pow: created ${note_file}"
-}
-
-update_existing_note() {
-    local person_name="$1"
-    local note_file="${PEOPLE_DIR}/${person_name}.md"
-
-    if ensure_pow_tag "$note_file"; then
-        log "tagged ${person_name}"
-        echo "pg_pow: added ${POW_TAG} tag to ${note_file}"
-        return 0
-    fi
-
-    log "skip existing note: ${person_name}"
-    [[ "${quiet:-0}" -eq 0 ]] && echo "pg_pow: ${note_file} already exists"
-    return 1
+    case "$result" in
+        STATUS:created)
+            log "created ${person_name} (${person_link})"
+            [[ "${quiet:-0}" -eq 0 ]] && echo "pg_pow: created ${note_file}" >&2
+            echo "STATUS:created"
+            return 0
+            ;;
+        STATUS:updated)
+            log "updated ${person_name} (${person_link})"
+            [[ "${quiet:-0}" -eq 0 ]] && echo "pg_pow: updated ${note_file}" >&2
+            echo "STATUS:updated"
+            return 0
+            ;;
+        STATUS:unchanged)
+            log "unchanged ${person_name}"
+            [[ "${quiet:-0}" -eq 0 ]] && echo "pg_pow: unchanged ${note_file}" >&2
+            echo "STATUS:unchanged"
+            return 2
+            ;;
+        *)
+            echo "pg_pow: apply failed for ${person_name}" >&2
+            echo "STATUS:failed"
+            return 1
+            ;;
+    esac
 }
 
 process_person() {
     local person_link="$1"
-    local parsed
+    local parsed person_name status_line rc=0
 
     parsed=$(fetch_markdown "$person_link")
     parse_fetched "$parsed"
-    [[ -n "$PARSED_TITLE" ]] || { log "skip unreadable interview: ${person_link}"; return 2; }
+    [[ -n "$PARSED_TITLE" ]] || { log "skip unreadable interview: ${person_link}"; return 3; }
 
-    local person_name="$PARSED_TITLE"
-    local note_file="${PEOPLE_DIR}/${person_name}.md"
-
-    if [[ -f "$note_file" ]]; then
-        update_existing_note "$person_name"
-        return 3
-    fi
-
-    create_person_note "$person_name" "$person_link"
+    person_name="$PARSED_TITLE"
+    status_line=$(apply_pow_note write "$person_name" "$person_link" "$PARSED_IMAGE" "$PARSED_BODY") || rc=$?
+    case "$status_line" in
+        STATUS:created|STATUS:updated) ;;
+        STATUS:unchanged) return 2 ;;
+        *) return 1 ;;
+    esac
 
     if [[ "${open_obsidian:-0}" -eq 1 ]]; then
         obsidian_cli -of "people/${person_name}"
@@ -450,7 +654,7 @@ process_person() {
 }
 
 run_backfill() {
-    local link created=0 tagged=0 skipped=0 failed=0
+    local link created=0 updated=0 unchanged=0 failed=0
 
     while IFS= read -r link; do
         [[ -z "$link" ]] && continue
@@ -464,23 +668,18 @@ run_backfill() {
             continue
         fi
 
-        note_file="${PEOPLE_DIR}/${PARSED_TITLE}.md"
-        if [[ -f "$note_file" ]]; then
-            if ensure_pow_tag "$note_file"; then
-                log "backfill tagged ${PARSED_TITLE}"
-                ((tagged++)) || true
-            else
-                ((skipped++)) || true
-            fi
-        else
-            create_person_note "$PARSED_TITLE" "$link" >/dev/null
-            ((created++)) || true
-        fi
+        status_line=$(apply_pow_note write "$PARSED_TITLE" "$link" "$PARSED_IMAGE" "$PARSED_BODY" 2>/dev/null) || true
+        case "$status_line" in
+            STATUS:created) ((created++)) || true ;;
+            STATUS:updated) ((updated++)) || true ;;
+            STATUS:unchanged) ((unchanged++)) || true ;;
+            *) ((failed++)) || true ;;
+        esac
         set -e
     done < <(list_interviews)
 
-    echo "pg_pow backfill: created ${created}, tagged ${tagged}, unchanged ${skipped}, failed ${failed}"
-    log "backfill complete: created=${created} tagged=${tagged} unchanged=${skipped} failed=${failed}"
+    echo "pg_pow backfill: created ${created}, updated ${updated}, unchanged ${unchanged}, failed ${failed}"
+    log "backfill complete: created=${created} updated=${updated} unchanged=${unchanged} failed=${failed}"
 }
 
 mode="create"
@@ -526,17 +725,23 @@ parse_fetched "$parsed"
 [[ -n "$PARSED_TITLE" ]] && person_name="$PARSED_TITLE"
 
 if [[ "$mode" == "markdown" ]]; then
-    build_note "$person_name" "$PARSED_IMAGE" "$PARSED_BODY"
+    apply_pow_note markdown "$person_name" "$person_link" "$PARSED_IMAGE" "$PARSED_BODY"
     exit 0
 fi
 
-note_file="${PEOPLE_DIR}/${person_name}.md"
-if [[ -f "$note_file" ]]; then
-    update_existing_note "$person_name"
+if [[ "$query" == "--latest" && -f "${PEOPLE_DIR}/${person_name}.md" ]]; then
+    log "skip existing ${person_name}"
     exit 0
 fi
 
-create_person_note "$person_name" "$person_link"
+status_line=$(apply_pow_note write "$person_name" "$person_link" "$PARSED_IMAGE" "$PARSED_BODY") || true
+case "$status_line" in
+    STATUS:created|STATUS:updated|STATUS:unchanged) ;;
+    *)
+        echo "pg_pow: failed to apply note for ${person_name}" >&2
+        exit 1
+        ;;
+esac
 
 if [[ "$open_obsidian" -eq 1 ]]; then
     obsidian_cli -of "people/${person_name}"
