@@ -12,7 +12,7 @@ question="?"
 separator=${doubledash}
 li="*"
 dojournal=
-ScriptVersion="1.4"
+ScriptVersion="1.5"
 task=0
 logging=0
 goal="Daily goals"
@@ -354,12 +354,22 @@ insertion=$?
 # insert the new comment
 # Get the start time of the previous item
 stime=$(head -n ${insertion} "${notefile}" | tail -n 1 | sed -e 's/^\(.*\)==.*$/\1/' -e 's/^.*==//')
-start_sec=$(date --date "$stime" +%s)
+start_sec=$(date --date "$stime" +%s 2>/dev/null)
 end_sec=$(date +%s)
-diff_minutes=$(( (end_sec - start_sec) / 60 ))
-[[ $logging -gt 0 ]] && echo "$diff_minutes minutes"
-[[ $diff_minutes -eq 1 ]] && plural="" || plural="s"
-[[ ! -z "${insertion}" ]] && sed -ie "${insertion}s/$/ | $diff_minutes minute${plural}/" "${notefile}"
+if [[ -n "$start_sec" && "$start_sec" =~ ^[0-9]+$ ]]; then
+    diff_sec=$((end_sec - start_sec))
+    if (( diff_sec >= 0 && diff_sec < 120 )); then
+        [[ $diff_sec -eq 1 ]] && plural="" || plural="s"
+        duration_suffix=" | ${diff_sec} second${plural}"
+        [[ $logging -gt 0 ]] && echo "${diff_sec} second${plural}"
+    else
+        diff_minutes=$((diff_sec / 60))
+        [[ $diff_minutes -eq 1 ]] && plural="" || plural="s"
+        duration_suffix=" | ${diff_minutes} minute${plural}"
+        [[ $logging -gt 0 ]] && echo "${diff_minutes} minute${plural}"
+    fi
+    [[ ! -z "${insertion}" ]] && sed -ie "${insertion}s/$/${duration_suffix}/" "${notefile}"
+fi
 
 # Append the bullet item to the end of the section
 [[ ! -z "${insertion}" ]] && sed -ie "${insertion}a\\
