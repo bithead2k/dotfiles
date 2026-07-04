@@ -23,6 +23,7 @@
 ScriptVersion="1.0"
 # Assume AT&T
 company=a
+category=a
 
 #===  FUNCTION  ================================================================
 #         NAME:  die
@@ -47,6 +48,8 @@ function usage ()
 
   Options: 
   -a|att             Is an AT&T employee
+  -c|category [enum] What kind of contact is this?
+                     (business|prisoner|church|ham)
   -f|frost           Is a Frost employee
   -h|help            Display this message
   -n|newt            Is a Newt Global employee
@@ -61,11 +64,13 @@ function usage ()
 #  Handle command line arguments
 #-----------------------------------------------------------------------
 
-while getopts ":afhnp:tv" opt
+while getopts ":ac:fhnp:tv" opt
 do
   case $opt in
 
     a|att      )  company=a;;
+
+    c|category )  category="$OPTARG;";;
 
     f|frost    )  company=f;;
 
@@ -89,17 +94,35 @@ shift $(($OPTIND-1))
 case $company in
     a)url='@att.com';            tags="ATT";
         street='208 S. Akard St.'; city='Dallas'; state='TX'; zip='75202';
-        business='"[[companies/AT&T]]"' ;;
+        business='"[[companies/AT&T]]"';
+        category="business";
+        ;;
     f)url='@frostbank.com';      tags="Frost";
         street='3838 Rogers'; city='San Antonio'; state='TX'; zip='78251';
-        business='"[[companies/Frost Bank|Frost Bank]]"' ;;
+        business='"[[companies/Frost Bank|Frost Bank]]"' ;
+        category="business";
+        ;;
     n)url='@newtglobalcorp.com'; tags="NewtGlobal";
         street='1255 Corporate Dr, Suite 200'; city='Irving'; state='TX'; zip='75038';
-        business='"[[companies/Newt Global]]"' ;;
+        business='"[[companies/Newt Global]]"' ;
+        category="business";
+        ;;
     t)url='@techhuman.com';      tags="TechHuman";
         street='110 E Houston St 7th Flr'; city='San Antonio'; state='TX'; zip='78205';
-        business='"[[Tech Quarry (SATO), LLC dba TechHuman]]"' ;;
+        business='"[[Tech Quarry (SATO), LLC dba TechHuman]]"';
+        category="business";
+        ;;
     *);;
+esac
+
+[[ "$category" == "a" ]] && die 2 "Contact must be assigned a category"
+
+case $category in
+    business) tags="$tags\n - business";;
+    prisoner) tags="$tags\n - prisoner";;
+    church)   tags="$tags\n - church";;
+    ham)      tags="$tags\n - ham";;
+    *) die 3 "Category must be one of business|prisoner|church|ham";;
 esac
 
 # echo $url $tags $street $city $state $zip $business $theguy
@@ -107,7 +130,7 @@ esac
 peopledir=~/Documents/notes/people/
 personfile="${peopledir}${theguy}.md"
 
-[[ -f "${personfile}" ]] && die 1 "${theguy} already exists."
+[[ -f "${personfile}" ]] && die 1 "${personfile} already exists."
 
 cat <<EOF > "${personfile}"
 ---
@@ -144,3 +167,32 @@ Department:
 Works for [[]]
 
 EOF
+
+# Do any special post processing
+case $category in
+    business) tags="$tags\n - business"
+        parse_li "${theguy}"
+        parse_bv "${theguy}"
+        ;;
+    prisoner) tags="$tags\n - prisoner";;
+        parse_bv "${theguy}"
+    church)   tags="$tags\n - church";;
+    ham)      tags="$tags\n - ham"
+        # Display first, so I can pick a call sign
+        ham=$(get_ham -p "${theguy#* }, ${theguy% *}" | 
+            grep "^${theguy#* }" | 
+            grep ", ${theguy% *}"  )
+        ham_count=$(echo -e "$ham" | wc -l)
+        [[ $ham_count -eq 0 ]] && continue
+        # Show what we got.
+        echo -e "$ham"
+        # put a reasonable command line on the clipboard
+        [[ $ham_count -ne 1 ]] && { echo "get_ham \"\${theguy}\" \| parse_license" | pbcopy } ||           call_sign=$(echo "$ham" | sed -e 's/^.* //')
+        # If we only got one, and it was an exact match, just do it.
+        [[ $ham_count -eq 1 ]] && [[! -z "$call_sign" ]] && get_ham "$call_sign" | parse_license
+        ;;
+    *) ;;
+esac
+
+obsidian_ensure_filename_alias "${personfile}"
+

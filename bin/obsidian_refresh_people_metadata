@@ -51,10 +51,8 @@ path.write_text(f"---\n" + "\n".join(out) + f"\n---\n{body}", encoding="utf-8")
 print(f"obsidian_refresh_people_metadata: flagged refresh ({stamp})")
 PY
 
-# Nudge Obsidian's filesystem watcher for people notes edited outside the app.
-if [[ -d "${OBSIDIAN}/people" ]]; then
-    find "${OBSIDIAN}/people" -name "*.md" -type f -exec touch {} +
-fi
+# Do NOT mass-touch people/*.md — hundreds of watcher events at once make
+# Obsidian's metadata cache *less* reliable after bulk external edits.
 
 if [[ -x "$OBSIDIAN_CLI" ]]; then
     "$OBSIDIAN_CLI" -of "reference/Refresh POW metadata" || true
@@ -70,6 +68,12 @@ Next steps (Obsidian must be running):
   3. Wait for "Metadata refresh complete".
   4. Re-open reference/People - PostgreSQL.md.
 
-If results are still stale: Command Palette → "Reload app without saving"
-or Settings → Files and links → Rebuild.
+If disk/cache/DQL counts on reference/People - PostgreSQL.md still diverge:
+  • Settings → Community plugins → Dataview OFF ~2 min → ON (per device)
+  • Or Command Palette → "Reload app without saving"
+
+Bulk external edits (parse_pgpow_locations --apply, parse_pgpow --backfill, etc.)
+should always be followed by this refresh on each Obsidian node.
+
+If aliases look wrong (aliases:  - Name on one line): repair_pow_aliases --apply
 EOF

@@ -57,5 +57,6 @@ title: \"$@\"
  "
 
 echo -e "$header" > "${articlefile}"
+obsidian_ensure_filename_alias "${articlefile}"
 # gvim "${articlefile}"
 

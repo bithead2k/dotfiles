@@ -1,46 +1,6 @@
-#!/bin/bash
-#===============================================================================
-#
-#          FILE:  newmoody
-# 
-#         USAGE:  ./newmoody 
-#
-#           (e.g.)  ./newmoody 2023-01-01
-# 
-#   DESCRIPTION:  Get the bible reading for the day and stick it in the journal
-# 
-#       OPTIONS:  Optional date of the moody reading
-#  REQUIREMENTS:  ---
-#          BUGS:  ---
-#         NOTES:  ---
-#        AUTHOR:  Kirk L. Roybal (), Kirk@timescale.com
-#       COMPANY:  Timescale
-#       VERSION:  1.0
-#       CREATED:  01/10/2023 06:50:19 AM CST
-#      REVISION:  ---
-#===============================================================================
-
-
-function die(){
-    retval=$1
-    shift
-    echo -e "$@"
-    exit $1
-}
-
-# default to today
-[[ "$1" == "" ]] && thedate=$(date) || thedate="$1"
-
-# Check for a journal for the date
-journaldir=~/Documents/pandoc_notes/
-journalfile="${journaldir}journal_$(date --date "$thedate" +"%Y_%m_%d").md"
-# echo "${journalfile}"
-[[ -f "$journalfile" ]] || die 1 "Journal $journalfile not found for today.  Try: newjournal"
-
-echo -e "\n# Moody Reading for $(date --date "$thedate" +"%F")\n\nEntry: **$(date --date "$thedate" +"%F %T CST")**\n\n" >> "$journalfile"
-
-moody_today "$thedate" >> "$journalfile"
-
-echo -e "\n\n" >> "$journalfile"
-
-gvim "$journalfile"
+#!/usr/bin/env bash
+set -euo pipefail
+BIN="${JOURNAL_BIN:-${KLR_BIN:-$HOME/bin}}"
+# Legacy name — create moody for a date (default today)
+thedate="${1:-$(date +%F)}"
+exec "$BIN/journal_create_moody" -d "$thedate" -f

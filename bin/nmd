@@ -31,4 +31,5 @@ function die() {
 [[ -f "$1".md ]] || [[ -f "$1".markdown ]] && die 1 "File already exists."
 
 echo -e "---\n\n\n---\n\n" > "$1.md"
+obsidian_ensure_filename_alias "$1.md"
 nvim "$1.md"

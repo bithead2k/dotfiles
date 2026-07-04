@@ -1,0 +1,738 @@
+#!/usr/bin/env python3
+"""Fill blank city/state/country on pg_pow people notes from body text and person_location."""
+from __future__ import annotations
+
+import argparse
+import re
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+OBSIDIAN = Path(__import__("os").environ.get("OBSIDIAN", Path.home() / "Documents/notes"))
+PEOPLE_DIR = OBSIDIAN / "people"
+
+US_STATES = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI", "south carolina": "SC",
+    "south dakota": "SD", "tennessee": "TN", "texas": "TX", "utah": "UT",
+    "vermont": "VT", "virginia": "VA", "washington": "WA", "west virginia": "WV",
+    "wisconsin": "WI", "wyoming": "WY", "district of columbia": "DC",
+}
+US_ABBREVS = set(US_STATES.values())
+
+COUNTRY_ALIASES = {
+    "united states": "USA",
+    "united states of america": "USA",
+    "usa": "USA",
+    "u.s.": "USA",
+    "u.s.a.": "USA",
+    "us": "USA",
+    "uk": "United Kingdom",
+    "united kingdom": "United Kingdom",
+    "great britain": "United Kingdom",
+    "england": "United Kingdom",
+    "scotland": "United Kingdom",
+    "wales": "United Kingdom",
+    "northern ireland": "United Kingdom",
+    "czechia": "Czech Republic",
+    "holland": "Netherlands",
+    "uae": "United Arab Emirates",
+}
+
+# region phrase -> (city, state, country)
+US_REGIONS = {
+    "bay area": ("", "CA", "USA"),
+    "san francisco bay area": ("San Francisco", "CA", "USA"),
+    "silicon valley": ("", "CA", "USA"),
+    "greater los angeles area": ("Los Angeles", "CA", "USA"),
+    "los angeles area": ("Los Angeles", "CA", "USA"),
+    "southern california": ("", "CA", "USA"),
+    "northern california": ("", "CA", "USA"),
+    "greater seattle area": ("Seattle", "WA", "USA"),
+    "seattle area": ("Seattle", "WA", "USA"),
+    "greater boston area": ("Boston", "MA", "USA"),
+    "greater new york area": ("New York", "NY", "USA"),
+    "new york city metropolitan area": ("New York", "NY", "USA"),
+    "nyc metropolitan area": ("New York", "NY", "USA"),
+    "greater chicago area": ("Chicago", "IL", "USA"),
+    "chicago area": ("Chicago", "IL", "USA"),
+    "dallas-fort worth metroplex": ("Dallas", "TX", "USA"),
+    "dfw metroplex": ("Dallas", "TX", "USA"),
+    "greater philadelphia area": ("Philadelphia", "PA", "USA"),
+    "greater denver area": ("Denver", "CO", "USA"),
+    "greater austin area": ("Austin", "TX", "USA"),
+    "greater atlanta area": ("Atlanta", "GA", "USA"),
+    "greater phoenix area": ("Phoenix", "AZ", "USA"),
+    "greater minneapolis area": ("Minneapolis", "MN", "USA"),
+    "research triangle": ("Raleigh", "NC", "USA"),
+    "triangle area": ("Raleigh", "NC", "USA"),
+    "dc metro": ("Washington", "DC", "USA"),
+    "washington dc area": ("Washington", "DC", "USA"),
+    "national capital region": ("Washington", "DC", "USA"),
+}
+
+NATIVE_REGIONS = {
+    "californian": ("", "CA", "USA"),
+    "texan": ("", "TX", "USA"),
+    "new yorker": ("New York", "NY", "USA"),
+    "pennsylvanian": ("", "PA", "USA"),
+}
+
+KNOWN_CITIES = {
+    "philadelphia": ("Philadelphia", "PA", "USA"),
+    "minneapolis": ("Minneapolis", "MN", "USA"),
+    "pune": ("Pune", "MH", "India"),
+    "mumbai": ("Mumbai", "MH", "India"),
+    "bangalore": ("Bangalore", "KA", "India"),
+    "bengaluru": ("Bengaluru", "KA", "India"),
+    "chennai": ("Chennai", "TN", "India"),
+    "delhi": ("Delhi", "DL", "India"),
+    "hyderabad": ("Hyderabad", "TS", "India"),
+    "indore": ("Indore", "MP", "India"),
+    "dehradun": ("Dehradun", "UK", "India"),
+    "berlin": ("Berlin", "", "Germany"),
+    "munich": ("Munich", "BY", "Germany"),
+    "hamburg": ("Hamburg", "", "Germany"),
+    "frankfurt": ("Frankfurt", "HE", "Germany"),
+    "zurich": ("Zurich", "", "Switzerland"),
+    "geneva": ("Geneva", "", "Switzerland"),
+    "lyon": ("Lyon", "", "France"),
+    "paris": ("Paris", "", "France"),
+    "london": ("London", "", "United Kingdom"),
+    "tokyo": ("Tokyo", "", "Japan"),
+    "moscow": ("Moscow", "", "Russia"),
+    "istanbul": ("Istanbul", "", "Turkey"),
+    "ankara": ("Ankara", "", "Turkey"),
+    "islamabad": ("Islamabad", "", "Pakistan"),
+    "toronto": ("Toronto", "ON", "Canada"),
+    "vancouver": ("Vancouver", "BC", "Canada"),
+    "montreal": ("Montreal", "QC", "Canada"),
+    "ottawa": ("Ottawa", "ON", "Canada"),
+    "sydney": ("Sydney", "NSW", "Australia"),
+    "melbourne": ("Melbourne", "VIC", "Australia"),
+    "amsterdam": ("Amsterdam", "", "Netherlands"),
+    "brussels": ("Brussels", "", "Belgium"),
+    "prague": ("Prague", "", "Czech Republic"),
+    "warsaw": ("Warsaw", "", "Poland"),
+    "dublin": ("Dublin", "", "Ireland"),
+    "copenhagen": ("Copenhagen", "", "Denmark"),
+    "stockholm": ("Stockholm", "", "Sweden"),
+    "oslo": ("Oslo", "", "Norway"),
+    "helsinki": ("Helsinki", "", "Finland"),
+    "madrid": ("Madrid", "", "Spain"),
+    "barcelona": ("Barcelona", "", "Spain"),
+    "rome": ("Rome", "", "Italy"),
+    "milan": ("Milan", "", "Italy"),
+    "vienna": ("Vienna", "", "Austria"),
+    "budapest": ("Budapest", "", "Hungary"),
+    "bucharest": ("Bucharest", "", "Romania"),
+    "athens": ("Athens", "", "Greece"),
+    "lisbon": ("Lisbon", "", "Portugal"),
+    "guayaquil": ("Guayaquil", "", "Ecuador"),
+    "valence": ("Valence", "", "France"),
+    "palm coast": ("Palm Coast", "FL", "USA"),
+    "north carolina": ("", "NC", "USA"),
+    "moenchengladbach": ("Mönchengladbach", "", "Germany"),
+    "mönchengladbach": ("Mönchengladbach", "", "Germany"),
+    "ekaterinburg": ("Ekaterinburg", "", "Russia"),
+    "yekaterinburg": ("Yekaterinburg", "", "Russia"),
+    "toulouse": ("Toulouse", "", "France"),
+    "nanjing": ("Nanjing", "", "China"),
+    "sapulpa": ("Sapulpa", "OK", "USA"),
+    "portland": ("Portland", "OR", "USA"),
+    "lawrence": ("Lawrence", "KS", "USA"),
+    "bussum": ("Bussum", "", "Netherlands"),
+    "aachen": ("Aachen", "", "Germany"),
+    "basel": ("Basel", "", "Switzerland"),
+    "scarperia": ("Scarperia e San Piero", "", "Italy"),
+    "prato": ("Prato", "", "Italy"),
+    "chengalpattu": ("Chengalpattu", "TN", "India"),
+    "junglinster": ("Junglinster", "", "Luxembourg"),
+    "dover": ("Dover", "England", "United Kingdom"),
+    "san jose": ("San Jose", "CA", "USA"),
+    "oxford": ("Oxford", "England", "United Kingdom"),
+}
+
+JUNK_PERSON_LOCATION = re.compile(
+    r"\b(Engineer|Manager|Director|Contributor|Company|Co-Founder|CTO|CEO|"
+    r"Information and Internet|Diplom|Informatics|Major Contributor|"
+    r"Studied at|campus|Software Development|Principal|Senior|AWS|Microsoft|"
+    r"PostgreSQL,|Technology,|PMP|CSM|Self Employed|Self-employed|"
+    r"For personal reasons|I am living|Murthy)\b",
+    re.I,
+)
+
+ABBR_CITY_BLACKLIST = {
+    "mysql", "informix", "oracle", "postgres", "postgresql", "have", "used",
+    "pets", "center", "personal", "randstad", "planet", "major", "cloud",
+    "v r", "lawrence",  # lawrence KS is ok actually - keep lawrence
+}
+
+KNOWN_COUNTRIES = {
+    "afghanistan", "albania", "algeria", "argentina", "australia", "austria",
+    "bangladesh", "belgium", "brazil", "bulgaria", "canada", "chile", "china",
+    "colombia", "croatia", "czech republic", "denmark", "ecuador", "egypt",
+    "estonia", "finland", "france", "germany", "greece", "hungary", "iceland",
+    "india", "indonesia", "iran", "ireland", "israel", "italy", "japan",
+    "kenya", "latvia", "lithuania", "luxembourg", "malaysia", "mexico",
+    "netherlands", "new zealand", "nigeria", "norway", "pakistan", "peru",
+    "philippines", "poland", "portugal", "romania", "russia", "serbia",
+    "singapore", "slovakia", "slovenia", "south africa", "south korea",
+    "spain", "sri lanka", "sweden", "switzerland", "taiwan", "thailand",
+    "turkey", "ukraine", "united kingdom", "united states", "usa", "vietnam",
+}
+
+
+def yaml_scalar(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(x).strip() for x in value if str(x).strip())
+    return str(value).strip()
+
+
+def parse_frontmatter(text: str):
+    m = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
+    if not m:
+        return {}, [], text
+    fm_text = m.group(1)
+    body = text[m.end():]
+    data: dict[str, str] = {}
+    order: list[str] = []
+    current_key = None
+    for line in fm_text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith((" ", "\t")) and current_key:
+            data[current_key] = (data.get(current_key, "") + "\n" + line.rstrip()).strip("\n")
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        data[key] = value.strip()
+        order.append(key)
+        current_key = key
+    return data, order, body
+
+
+def render_frontmatter(data: dict, order: list[str]) -> str:
+    seen = set()
+    lines = ["---"]
+    for key in order:
+        if key in data and key not in seen:
+            value = data.get(key, "")
+            if "\n" in value:
+                lines.append(f"{key}:")
+                lines.extend(value.splitlines())
+            else:
+                lines.append(f"{key}: {value}" if yaml_scalar(value) else f"{key}: ")
+            seen.add(key)
+    for key, value in data.items():
+        if key not in seen:
+            if "\n" in value:
+                lines.append(f"{key}:")
+                lines.extend(value.splitlines())
+            else:
+                lines.append(f"{key}: {value}" if yaml_scalar(value) else f"{key}: ")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def normalize_country(raw: str) -> str:
+    s = raw.strip().rstrip(".")
+    if not s:
+        return ""
+    key = s.lower()
+    if key in COUNTRY_ALIASES:
+        return COUNTRY_ALIASES[key]
+    if len(s) == 2 and s.isalpha() and s.upper() not in US_ABBREVS:
+        return s.upper()
+    return s if s[0].isupper() else s.title()
+
+
+def normalize_state(raw: str, country: str = "") -> str:
+    s = raw.strip().rstrip(".")
+    if not s:
+        return ""
+    low = s.lower()
+    if country in ("USA", "") and low in US_STATES:
+        return US_STATES[low]
+    if len(s) == 2 and s.upper() in US_ABBREVS:
+        return s.upper()
+    return s
+
+
+def loc_tuple(city: str = "", state: str = "", country: str = "", source: str = "", conf: int = 0):
+    return {
+        "city": city.strip(),
+        "state": state.strip(),
+        "country": country.strip(),
+        "source": source,
+        "confidence": conf,
+    }
+
+
+def merge_loc(best: dict | None, new: dict | None) -> dict | None:
+    if not new or new.get("confidence", 0) <= 0:
+        return best
+    if not best:
+        return dict(new)
+    out = dict(best)
+    for k in ("city", "state", "country"):
+        if new.get(k) and (not out.get(k) or new["confidence"] >= out.get("confidence", 0)):
+            out[k] = new[k]
+    out["confidence"] = max(best.get("confidence", 0), new.get("confidence", 0))
+    out["source"] = new.get("source") or best.get("source")
+    return out
+
+
+def is_country_name(name: str) -> bool:
+    low = name.strip().lower()
+    return low in KNOWN_COUNTRIES or low in COUNTRY_ALIASES
+
+
+def sanitize_loc(loc: dict | None) -> dict | None:
+    if not loc:
+        return None
+    city = loc.get("city", "")
+    state = loc.get("state", "")
+    country = loc.get("country", "")
+    if state and country and state.lower() == country.lower():
+        state = ""
+    if city and len(city) > 50:
+        return None
+    if city and any(w in city.lower() for w in ("have used", "informix", "mysql", "personal reasons")):
+        return None
+    if state and len(state) > 40:
+        state = ""
+        loc["state"] = ""
+    return loc
+
+
+def parse_comma_location(text: str, source: str, conf: int) -> dict | None:
+    text = re.sub(r"\s+", " ", text.strip().rstrip("."))
+    if not text or JUNK_PERSON_LOCATION.search(text):
+        return None
+    if len(text) > 100:
+        return None
+
+    low = text.lower()
+    for region, tpl in sorted(US_REGIONS.items(), key=lambda x: -len(x[0])):
+        if low == region or low.endswith(region) or low.startswith(region):
+            return sanitize_loc(loc_tuple(tpl[0], tpl[1], tpl[2], source, conf))
+
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) < 2:
+        return None
+
+    city = parts[0]
+    country = ""
+    state = ""
+
+    last = parts[-1]
+    if is_country_name(last):
+        country = normalize_country(last)
+        if len(parts) == 2:
+            return sanitize_loc(loc_tuple(city, "", country, source, conf))
+        mid = parts[1]
+        if country == "USA" and (mid.lower() in US_STATES or normalize_state(mid, "USA") in US_ABBREVS):
+            state = normalize_state(mid, "USA")
+        elif country == "United Kingdom" and mid.lower() in ("england", "scotland", "wales"):
+            state = mid.title()
+        elif not is_country_name(mid):
+            state = mid
+        return sanitize_loc(loc_tuple(city, state, country, source, conf))
+
+    if len(parts) == 2:
+        second = parts[1]
+        if second.lower() in US_STATES or normalize_state(second, "USA") in US_ABBREVS:
+            return sanitize_loc(loc_tuple(city, normalize_state(second, "USA"), "USA", source, conf))
+
+    return None
+
+
+def parse_parenthetical_country(text: str) -> str:
+    m = re.search(r"\(\s*in\s+([^)]+?)\s*\)", text, re.I)
+    if not m:
+        return ""
+    chunk = m.group(1).split("not")[0].strip()
+    if is_country_name(chunk):
+        return normalize_country(chunk)
+    return ""
+
+
+def extract_bio(body: str) -> str:
+    patterns = [
+        r"### Please tell us about yourself[^\n]*\n\n+(.+?)(?=\n\n|#)",
+        r"## Please tell us about yourself[^\n]*\n\n+(.+?)(?=\n\n|#)",
+        r"I['']m [^\n]+ from ([^\n\.]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, body, re.I | re.S)
+        if m:
+            text = m.group(1).strip()
+            text = re.sub(r"\s+", " ", text)
+            return text[:800]
+    return ""
+
+
+def search_patterns(text: str, *, bio_only: bool = True) -> list[dict]:
+    hits: list[dict] = []
+    if not text:
+        return hits
+
+    scope = text[:500] if bio_only else text
+    low = scope.lower()
+
+    for nat, tpl in NATIVE_REGIONS.items():
+        if re.search(rf"\bnative\s+{re.escape(nat)}\b", low):
+            hits.append(loc_tuple(tpl[0], tpl[1], tpl[2], f"native:{nat}", 80))
+
+    # explicit live-in with parenthetical country
+    m = re.search(
+        r"\b(?:I\s+)?live in\s+([A-Za-z][A-Za-z .'-]+?)\s*\([^)]+\)",
+        scope,
+        re.I,
+    )
+    if m:
+        city = m.group(1).strip()
+        country = parse_parenthetical_country(scope[m.start():m.end() + 40])
+        if country:
+            hits.append(sanitize_loc(loc_tuple(city, "", country, "bio:live-in-paren", 92)))
+
+    m = re.search(r"\b(?:I\s+)?live in\s+([A-Za-z][A-Za-z .'-]+?)\s*,", scope, re.I)
+    if m:
+        city = m.group(1).strip()
+        if city.lower() not in {"france", "germany", "belgium", "japan"}:
+            parsed = parse_location_phrase(city, "bio:live-in", 88)
+            if parsed:
+                hits.append(parsed)
+
+    m = re.search(
+        r"\blive in\s+(?:the\s+)?(France|Germany|Belgium|Japan|Turkey|Russia|India|Australia|UK|U\.K\.|Ecuador|Brazil|Canada|Netherlands|Switzerland|Luxembourg|Poland|Czech Republic|Austria|Spain|Italy|Portugal|Sweden|Norway|Finland|Denmark|Ireland|Israel|Singapore|Indonesia|Philippines|Mexico|Argentina|Chile|South Africa|New Zealand)\b",
+        scope,
+        re.I,
+    )
+    if m:
+        hits.append(loc_tuple("", "", normalize_country(m.group(1)), "bio:live-in-country", 85))
+
+    m = re.search(r"\bBorn a\s+([A-Za-z]+)er\b", scope, re.I)
+    if m:
+        demonym = m.group(1).lower()
+        demonym_map = {
+            "london": ("London", "", "United Kingdom"),
+            "york": ("New York", "NY", "USA"),
+            "dubliner": ("Dublin", "", "Ireland"),
+        }
+        key = demonym if demonym in demonym_map else demonym + "er"
+        if demonym == "london":
+            hits.append(loc_tuple("London", "", "United Kingdom", "bio:born-demonym", 80))
+
+    m = re.search(r"\b(?:have\s+)?lived in\s+([A-Za-z][A-Za-z .'-]+?)\b", scope, re.I)
+    if m:
+        city = m.group(1).strip()
+        parsed = parse_location_phrase(city, "bio:lived-in", 82)
+        if parsed:
+            hits.append(parsed)
+
+    m = re.search(r"\b(?:south|north|west|east) of\s+(Germany|France|Italy|India)\b", scope, re.I)
+    if m:
+        hits.append(loc_tuple("", "", normalize_country(m.group(1)), "bio:region-of-country", 78))
+
+    m = re.search(
+        r"\bfrom\s+(Russia|India|Germany|France|Belgium|Turkey|Australia|Japan|Ecuador|Brazil|Canada|Netherlands|Switzerland|Luxembourg|Poland|Czech Republic|Austria|Spain|Italy|Portugal|Sweden|Norway|Finland|Denmark|Ireland|Israel|Singapore|Indonesia|Philippines|Mexico|Argentina|Chile|South Africa|New Zealand|UK|U\.K\.)\b",
+        scope,
+        re.I,
+    )
+    if m:
+        hits.append(loc_tuple("", "", normalize_country(m.group(1)), "bio:from-country", 75))
+
+    m = re.search(r"\bmoved to\s+(?:the\s+)?(?:nearby\s+)?city\s+([A-Za-z][A-Za-z .'-]+)\b", scope, re.I)
+    if m:
+        parsed = parse_location_phrase(m.group(1), "bio:moved-to-city", 80)
+        if parsed:
+            hits.append(parsed)
+
+    m = re.search(
+        r"\blive with my family in\s+([A-Za-z][A-Za-z .'-]+),\s*([A-Za-z][A-Za-z .'-]+)",
+        scope,
+        re.I,
+    )
+    if m:
+        parsed = parse_comma_location(f"{m.group(1)}, {m.group(2)}, USA", "bio:family-in", 90)
+        if parsed:
+            hits.append(parsed)
+
+    m = re.search(
+        r"\b([A-Za-z][A-Za-z .'-]+),\s*(?:a\s+)?(?:northern\s+|southern\s+)?state in the (?:USA|United States)\b",
+        scope,
+        re.I,
+    )
+    if m:
+        st = normalize_state(m.group(1), "USA")
+        if st:
+            hits.append(loc_tuple("", st, "USA", "bio:state-in-usa", 85))
+
+    m = re.search(r"\b([A-Za-z][A-Za-z .'-]{2,}),\s*([A-Z]{2})\b", scope)
+    if m:
+        city, st = m.group(1).strip(), m.group(2).upper()
+        if st in US_ABBREVS and city.split()[-1].lower() not in ABBR_CITY_BLACKLIST:
+            if city.lower() not in ABBR_CITY_BLACKLIST:
+                hits.append(loc_tuple(city, st, "USA", "bio:city-st-abbr", 92))
+
+    m = re.search(r"\b(?:now\s+)?(?:living|residing|based)\s+(?:in|out of)\s+([A-Za-z][A-Za-z .'-]+?)(?:,|\.)", scope, re.I)
+    if m:
+        parsed = parse_location_phrase(m.group(1), "bio:based-in", 85)
+        if parsed:
+            hits.append(parsed)
+
+    m = re.search(
+        r"\b(?:now I\s+)?live in\s+(" + "|".join(s.title() for s in US_STATES.keys()) + r"|Oregon|California|Texas|Florida|Ohio|Virginia|Colorado|Washington|Maryland|Georgia|Arizona|Massachusetts|Pennsylvania|Michigan|Wisconsin|Minnesota|Missouri|Tennessee|Indiana|Connecticut|Utah|Nevada|Kentucky|Louisiana|Alabama|Oklahoma|Iowa|Arkansas|Kansas|Mississippi|Nebraska|Idaho|New Mexico|West Virginia|Hawaii|Alaska|Maine|New Hampshire|Rhode Island|Montana|Wyoming|North Dakota|South Dakota|Delaware|Vermont|District of Columbia|DC)\b",
+        scope,
+        re.I,
+    )
+    if m:
+        st = normalize_state(m.group(1), "USA")
+        hits.append(loc_tuple("", st, "USA", "bio:live-in-us-state", 86))
+
+    m = re.search(r"\bmainly lived in\s+(Japan|Germany|France|Belgium)\b", scope, re.I)
+    if m:
+        hits.append(loc_tuple("", "", normalize_country(m.group(1)), "bio:mainly-lived", 82))
+
+    m = re.search(r"\bliving in\s+(Japan|Germany|France|Belgium|Turkey)\b", scope, re.I)
+    if m:
+        hits.append(loc_tuple("", "", normalize_country(m.group(1)), "bio:living-in-country", 80))
+
+    residence_ctx = re.compile(
+        r"(?:live|lived|living|based|from|born|grew up|moved to|reside|settled|near|in)\s+.{0,60}?\b",
+        re.I,
+    )
+    for city_key, tpl in KNOWN_CITIES.items():
+        for m in re.finditer(rf"\b{re.escape(city_key)}\b", low):
+            before = scope[max(0, m.start() - 80):m.start()]
+            if residence_ctx.search(before) or re.search(
+                rf"\b(?:live|lived|living|from|born|moved|near|in)\s+(?:\w+\s+){{0,4}}{re.escape(city_key)}\b",
+                scope[: m.end() + 20],
+                re.I,
+            ):
+                hits.append(loc_tuple(tpl[0], tpl[1], tpl[2], f"city:{city_key}", 72))
+
+    for region, tpl in sorted(US_REGIONS.items(), key=lambda x: -len(x[0])):
+        if re.search(rf"\b(?:live|lived|living|from|in|near)\s+[^.]{{0,40}}\b{re.escape(region)}\b", scope, re.I):
+            hits.append(loc_tuple(tpl[0], tpl[1], tpl[2], f"region:{region}", 68))
+
+    return [h for h in hits if h]
+
+
+def parse_location_phrase(phrase: str, source: str, conf: int) -> dict | None:
+    phrase = re.sub(r"\s+", " ", phrase.strip().rstrip("."))
+    if not phrase or len(phrase) > 80:
+        return None
+
+    low = phrase.lower()
+
+    if low in KNOWN_CITIES:
+        c, s, co = KNOWN_CITIES[low]
+        return loc_tuple(c, s, co, source, conf)
+
+    if low in US_STATES or low in US_ABBREVS:
+        st = normalize_state(phrase, "USA")
+        return loc_tuple("", st, "USA", source, conf - 5)
+
+    if low in COUNTRY_ALIASES or phrase.title() in {v.title() for v in set(COUNTRY_ALIASES.values())}:
+        return loc_tuple("", "", normalize_country(phrase), source, conf - 10)
+
+    # "Pune (MH)" / "near Chennai"
+    m = re.search(r"^([A-Za-z][A-Za-z .'-]+)\s*\(([A-Z]{2})\)$", phrase)
+    if m:
+        return loc_tuple(m.group(1), m.group(2), "India", source, conf)
+
+    if "," in phrase:
+        return parse_comma_location(phrase, source, conf)
+
+    # bare country names
+    countries = [
+        "Turkey", "France", "Germany", "India", "Russia", "Belgium", "Luxembourg",
+        "Switzerland", "Austria", "Netherlands", "Poland", "Czech Republic", "Spain",
+        "Italy", "Portugal", "Greece", "Sweden", "Norway", "Finland", "Denmark",
+        "Ireland", "Iceland", "Brazil", "Argentina", "Chile", "Mexico", "Canada",
+        "Australia", "New Zealand", "Japan", "China", "South Korea", "Taiwan",
+        "Singapore", "Malaysia", "Indonesia", "Philippines", "Vietnam", "Thailand",
+        "Pakistan", "Bangladesh", "Sri Lanka", "Nepal", "Israel", "Egypt",
+        "South Africa", "Nigeria", "Kenya", "Ecuador", "Colombia", "Peru",
+        "Ukraine", "Romania", "Hungary", "Bulgaria", "Serbia", "Croatia",
+        "Slovenia", "Slovakia", "Estonia", "Latvia", "Lithuania",
+    ]
+    for c in countries:
+        if low == c.lower() or low.endswith(f" {c.lower()}") or low.startswith(f"{c.lower()} "):
+            return loc_tuple("", "", c, source, conf - 5)
+
+    # Capitalized place name — city only, weak
+    if phrase[0].isupper() and " " not in phrase and len(phrase) > 3:
+        return loc_tuple(phrase, "", "", source, conf - 25)
+
+    return None
+
+
+def infer_location(fm: dict, body: str) -> dict | None:
+    best = None
+
+    intro = body.split("# PostgreSQL Person of the Week", 1)[0]
+    intro = intro.split("## PostgreSQL Person of the Week", 1)[0][:600]
+    for city_key, tpl in KNOWN_CITIES.items():
+        if not tpl[2]:
+            continue
+        if re.search(rf"\b{re.escape(tpl[0])},\s*{re.escape(tpl[2])}\b", intro, re.I):
+            best = merge_loc(best, loc_tuple(tpl[0], tpl[1], tpl[2], "intro:city-country", 90))
+
+    m = re.search(r"\bvillage named\s+([A-Za-z][A-Za-z .'-]+)\b", intro, re.I)
+    if m:
+        village = m.group(1).strip()
+        country_hit = best.get("country") if best else ""
+        if re.search(r"\blive in\b[^.]*\bGermany\b", intro, re.I):
+            country_hit = "Germany"
+        best = merge_loc(best, loc_tuple(village, "", country_hit or "", "bio:village-named", 84))
+
+    m = re.search(r"\b(?:am\s+)?now based in\s+([A-Za-z][A-Za-z .'-]+)\b", intro, re.I)
+    if m:
+        parsed = parse_location_phrase(m.group(1), "bio:based-in-now", 88)
+        if parsed:
+            best = merge_loc(best, parsed)
+
+    bio = extract_bio(body)
+    for hit in search_patterns(bio, bio_only=True):
+        best = merge_loc(best, hit)
+
+    pl = yaml_scalar(fm.get("person_location", ""))
+    if pl and not JUNK_PERSON_LOCATION.search(pl):
+        if re.search(r"\bliving in\s+([A-Za-z ]+)\b", pl, re.I):
+            c = normalize_country(re.search(r"\bliving in\s+([A-Za-z ]+)\b", pl, re.I).group(1))
+            if c:
+                ploc = loc_tuple("", "", c, "person_location:sentence", 88)
+            else:
+                ploc = None
+        else:
+            ploc = parse_comma_location(pl, "person_location", 95)
+        if ploc:
+            if not best:
+                best = ploc
+            else:
+                for k in ("city", "state", "country"):
+                    if ploc.get(k):
+                        best[k] = ploc[k]
+                best["confidence"] = max(best.get("confidence", 0), ploc.get("confidence", 0))
+                best["source"] = ploc.get("source", best.get("source"))
+
+    if best and best.get("confidence", 0) < 50:
+        return None
+    return sanitize_loc(best)
+
+
+def apply_location(fm: dict, loc: dict) -> dict[str, str]:
+    updates = {}
+    for key in ("city", "state", "country"):
+        if yaml_scalar(fm.get(key, "")):
+            continue
+        val = loc.get(key, "")
+        if val:
+            updates[key] = val
+    return updates
+
+
+def needs_location(fm: dict) -> bool:
+    return any(not yaml_scalar(fm.get(k, "")) for k in ("city", "state", "country"))
+
+
+def is_pow(fm: dict) -> bool:
+    return yaml_scalar(fm.get("pg_pow", "")).lower() == "true"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--apply", action="store_true", help="Write updates to note files")
+    ap.add_argument(
+        "--queue-refresh",
+        action="store_true",
+        help="After --apply, run obsidian_refresh_people_metadata (Obsidian must be open)",
+    )
+    ap.add_argument("--verbose", "-v", action="store_true")
+    args = ap.parse_args()
+
+    changed = 0
+    skipped = 0
+    no_infer = 0
+
+    for path in sorted(PEOPLE_DIR.glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        fm, order, body = parse_frontmatter(text)
+        if not is_pow(fm):
+            continue
+
+        if not needs_location(fm):
+            skipped += 1
+            continue
+
+        loc = infer_location(fm, body)
+        if not loc:
+            no_infer += 1
+            if args.verbose:
+                print(f"  ? {path.name}: no inference")
+            continue
+
+        updates = apply_location(fm, loc)
+        if not updates:
+            skipped += 1
+            continue
+
+        parts = [f"{k}={updates[k]}" for k in ("city", "state", "country") if k in updates]
+        print(f"{'>' if args.apply else '+'} {path.name}: {', '.join(parts)}  ({loc['source']}, {loc['confidence']})")
+
+        if args.apply:
+            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for k, v in updates.items():
+                fm[k] = v
+                if k not in order:
+                    if "zip" in order:
+                        order.insert(order.index("zip") + 1, k)
+                    elif "country" in order:
+                        order.insert(order.index("country"), k)
+                    else:
+                        order.append(k)
+            fm["pow_indexed"] = stamp
+            if "pow_indexed" not in order:
+                order.append("pow_indexed")
+            new_text = render_frontmatter(fm, order) + body.lstrip("\n")
+            path.write_text(new_text, encoding="utf-8")
+        changed += 1
+
+    print(f"\nSummary: {changed} updated, {skipped} skipped (already filled), {no_infer} no inference")
+    if not args.apply and changed:
+        print("Re-run with --apply to write changes.")
+    if args.apply and changed:
+        print(
+            "\nObsidian metadata cache will be stale until in-app refresh.\n"
+            "  obsidian_refresh_people_metadata\n"
+            "Then reload reference/Refresh POW metadata.md and re-open People - PostgreSQL."
+        )
+        if args.queue_refresh:
+            refresh = Path.home() / "bin" / "obsidian_refresh_people_metadata"
+            if refresh.is_file():
+                subprocess.run([str(refresh)], check=False)
+            else:
+                print(f"queue-refresh: missing {refresh}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

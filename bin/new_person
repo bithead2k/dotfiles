@@ -26,3 +26,5 @@ template=$(cat "${template}" |
     sed -e "s/{{date}}/$(date +"%F")/g" -e "s/{{title}}/${newname}/g" \
         -e "/^work_email/s/.*/work_email: ${first_name}.${last_name}@frostbank.com/" )
 ~/bin/obsidian_cli -naf "people/${newname}" -t "${template}"
+personfile=~/Documents/notes/people/"${newname}.md"
+[[ -f "$personfile" ]] && obsidian_ensure_filename_alias "$personfile"

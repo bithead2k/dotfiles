@@ -12,18 +12,87 @@ question="?"
 separator=${doubledash}
 li="*"
 dojournal=
-ScriptVersion="1.0"
+ScriptVersion="1.4"
 task=0
 logging=0
 goal="Daily goals"
-file_lines=$(cat "${notefile}" | wc -l)
-# find the highest horizontal line
-divider=$(cat "${notefile}" | 
-    grep -n "<hr style='border-width: 6px; border-color:white'/>" | 
-    tail -n 1 | sed -e 's/:.*$//')
-# Look for the header within 4 lines of the divider
-(( div_plus4=divider+4 ))
-section_start=$(awk "/${section_name}/ && NR >= $divider && NR <= $div_plus4 { print NR }" "${notefile}")
+list_interstitial=0
+list_goals=0
+list_stretch=0
+goal_add=""
+file_lines=0
+divider=0
+section_start=
+
+function refresh_journal_layout() {
+    [[ -f "${notefile}" ]] || return 1
+    file_lines=$(wc -l < "${notefile}")
+    divider=$(grep -n "<hr style='border-width: 6px; border-color:white'/>" "${notefile}" |
+        tail -n 1 | sed -e 's/:.*$//')
+    section_start=$(awk "/${section_name}/ && NR >= $divider && NR <= $((divider + 4)) { print NR }" "${notefile}")
+}
+
+if [[ -f "${notefile}" ]]; then
+    refresh_journal_layout
+    (( div_plus4=divider+4 ))
+fi
+
+function interstitial_item_lines() {
+    local start i line
+    refresh_journal_layout || return 1
+    [[ -n "${section_start}" ]] || return 1
+    start=$((section_start + 2))
+    for ((i = start; i <= file_lines; i++)); do
+        line=$(sed -n "${i}p" "${notefile}")
+        [[ "$line" =~ \<hr\ style=\'border-width:\ 5px ]] && break
+        [[ "$line" =~ ^[[:space:]]*[\*-] ]] && echo "$i"
+    done
+}
+
+function list_interstitial_items() {
+    local n=0 line lineno
+    refresh_journal_layout || {
+        echo "No journal for today: ${notefile}" >&2
+        return 1
+    }
+    [[ -n "${section_start}" ]] || {
+        echo "No ${section_name} section in ${notefile}" >&2
+        return 1
+    }
+    while read -r lineno; do
+        n=$((n + 1))
+        line=$(sed -n "${lineno}p" "${notefile}")
+        printf '%4d  %s\n' "$n" "$line"
+    done < <(interstitial_item_lines)
+    [[ "$n" -eq 0 ]] && echo "(empty)"
+    return 0
+}
+
+function list_goal_items() {
+    local header_pattern=$1 label=$2 stop_pattern=$3
+    local section_line start i line n=0
+    [[ -f "${notefile}" ]] || {
+        echo "No journal for today: ${notefile}" >&2
+        return 1
+    }
+    file_lines=$(wc -l < "${notefile}")
+    section_line=$(grep -n "${header_pattern}" "${notefile}" | head -n 1 | cut -d: -f1)
+    [[ -n "${section_line}" ]] || {
+        echo "No ${label} section in ${notefile}" >&2
+        return 1
+    }
+    start=$((section_line + 2))
+    for ((i = start; i <= file_lines; i++)); do
+        line=$(sed -n "${i}p" "${notefile}")
+        [[ "$line" =~ ${stop_pattern} ]] && break
+        [[ "$line" =~ ^[[:space:]]*[\*-].*\[ ]] && {
+            n=$((n + 1))
+            printf '%4d  %s\n' "$n" "$line"
+        }
+    done
+    [[ "$n" -eq 0 ]] && echo "(empty)"
+    return 0
+}
 
 function gojournal(){
     lineno=${1}
@@ -55,32 +124,70 @@ function list_tasks(){
     cat "${notefile}" | column
 }
 
-function add_daily_goal(){
+function remove_task_item() {
+    local n=$1 count
+    [[ -f "${tasks}" ]] || {
+        echo "No task list: ${tasks}" >&2
+        return 1
+    }
+    count=$(wc -l < "${tasks}")
+    [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 1 && "$n" -le "$count" ]] || {
+        echo "Invalid task number: ${n} (use: o, then o -x NUMBER)" >&2
+        return 1
+    }
+    sed -i "${n}d" "${tasks}"
+    echo "Removed task #${n} from ${tasks}"
+    cat -n "${tasks}" | column -t --separator $'\n'
+}
 
-    goal_section=$(cat -n $notefile | grep "${goal}:" | sed -e 's/^[[:space:]]*//' -e 's/\t.*$//')
-    (( goal_section++ ))
-    (( goal_section++ ))
-    # start looking for open lines
-    open_line=
-    iterate=0
-    found=0
-    while [ $iterate -le 20 ]
-    do
-        (( indexof=goal_section+iterate ))
-        testbunny=$(cat $notefile | head -n $indexof | tail -n 1 | sed -e  's/\t.*$//' -e 's/[^[:print:]]*//g' )
-        [[ "$testbunny" == "---" ]] && break
-        [[ "$testbunny" == "" ]] && break
-        echo -e "$testbunny" | grep '\- \[ \] $' >/dev/null && {
-            sed -i "${indexof}s/$/${*}/" "$notefile"
-            exit
-        }
-        (( iterate++ ))
+function goal_section_start() {
+    local header_pattern=$1
+    local section_line
+    section_line=$(grep -n "${header_pattern}" "${notefile}" | head -n 1 | cut -d: -f1)
+    [[ -n "${section_line}" ]] || return 1
+    echo $((section_line + 2))
+}
+
+function add_daily_goal() {
+    local header_pattern insert_before start i line text=$*
+    [[ -f "${notefile}" ]] || {
+        echo "No journal for today: ${notefile}" >&2
+        exit 1
+    }
+    file_lines=$(wc -l < "${notefile}")
+
+    if [[ "${goal}" == "Stretch goals" ]]; then
+        header_pattern='Stretch [Gg]oals'
+        insert_before='<hr'
+    else
+        header_pattern='Daily goals'
+        insert_before='^[[:space:]]*---'
+    fi
+
+    start=$(goal_section_start "${header_pattern}") || {
+        echo "No ${goal} section in ${notefile}" >&2
+        exit 1
+    }
+
+    for ((i = start; i <= file_lines; i++)); do
+        line=$(sed -n "${i}p" "${notefile}")
+        [[ "$line" =~ ${insert_before} ]] && break
+        if [[ "$line" =~ ^[[:space:]]*[\*-][[:space:]]*-[[:space:]]*\[[[:space:]]\][[:space:]]*$ ]]; then
+            sed -i "${i}s/[ ]]/[ ] ${text}/" "$notefile"
+            exit 0
+        fi
     done
-# If we got here, there wasn't an available line
-(( iterate-- ))
-(( indexof=goal_section+iterate ))
-sed -i "${indexof}a\ - [ ] ${*}" "$notefile"
-exit
+
+    for ((i = start; i <= file_lines; i++)); do
+        line=$(sed -n "${i}p" "${notefile}")
+        [[ "$line" =~ ${insert_before} ]] && {
+            sed -i "${i}i\\ * - [ ] ${text}" "$notefile"
+            exit 0
+        }
+    done
+
+    echo "Could not add ${goal} to ${notefile}" >&2
+    exit 1
 }
 
 #===  FUNCTION  ================================================================
@@ -97,16 +204,25 @@ function usage ()
   -a            Long right arrow 
   -c            Checkbox
   -d|debug      
-  -g|goal  text Add goal for the day
+  -g|goal  text Add daily goal (-a/-m etc. ignored; e.g. o -g "goal text")
+  -G            List today's daily goals (numbered)
   -h|help       Display this message
+  -i            List today's interstitial log (numbered)
   -j|journal    Open today's interstitial journal
   -l|logging    Cumulative logging (e.g. -lll)
   -m            mDash
-  -s|stretch text Add stretch goal for the day
+  -s|stretch text Add stretch goal (-a/-m etc. ignored; e.g. o -s "goal text")
+  -S            List today's stretch goals (numbered)
   -t  number    Add a task by the number
   -T  text      Add a task to the task list
+  -x  number    Remove a task from the task list (opposite of -T; see plain o)
   -q            Question
   -v|version    Display script version
+
+  o              List reusable tasks (snippets/tasks.md)
+  o -i           List today's interstitial log entries
+  o -G           List today's daily goals
+  o -S           List today's stretch goals
 
 For a list of tasks, just invoke ${0##/*/} with no parameters
 
@@ -117,7 +233,7 @@ For a list of tasks, just invoke ${0##/*/} with no parameters
 #  Handle command line arguments
 #-----------------------------------------------------------------------
 
-while getopts ":acdg:hjlmqs:t:T:v" opt
+while getopts ":acdgGhjilmqs:t:T:Svx:" opt
 do
   case $opt in
 
@@ -127,9 +243,13 @@ do
 
     d|debug    ) set -x;;
 
-    g|goal     )  shift; add_daily_goal "$*"; exit;;
+    g|goal     ) goal_add=daily;;
+
+    G          ) list_goals=1;;
 
     h|help     )  usage; exit 0   ;;
+
+    i          ) list_interstitial=1;;
 
     j|journal  )  dojournal=true;;
 
@@ -137,11 +257,15 @@ do
    
     m          )  separator=${mdash};;
 
-    s|stretch  )  shift; goal="Stretch goals"; add_daily_goal "$*"; exit;;
+    s|stretch  ) goal_add=stretch;;
+
+    S          ) list_stretch=1;;
 
     t          )  task="${OPTARG}";;
 
     T          )  shift; echo -n "${*}" >> "${tasks}"; cat "${tasks}" | sort | uniq > "${tasks}.tmp"; mv "${tasks}.tmp" "${tasks}"; exit;;
+
+    x          ) remove_task_item "${OPTARG}"; exit;;
 
     q          )  separator=${question};;
 
@@ -154,16 +278,37 @@ do
 done
 shift $(($OPTIND-1))
 
+[[ "${list_interstitial}" -eq 1 ]] && { list_interstitial_items; exit; }
+[[ "${list_goals}" -eq 1 ]] && { list_goal_items 'Daily goals' 'Daily goals' '^[[:space:]]*---|^\*\*Stretch'; exit; }
+[[ "${list_stretch}" -eq 1 ]] && { list_goal_items 'Stretch [Gg]oals' 'Stretch goals' "\<hr"; exit; }
+
+if [[ -n "${goal_add}" ]]; then
+    [[ "${goal_add}" == stretch ]] && goal="Stretch goals"
+    [[ -z "$*" ]] && {
+        [[ "${goal_add}" == stretch ]] && echo 'Missing stretch goal text (e.g. o -s "goal text")' >&2
+        [[ "${goal_add}" != stretch ]] && echo 'Missing daily goal text (e.g. o -g "goal text")' >&2
+        exit 1
+    }
+    add_daily_goal "$*"
+    exit 0
+fi
+
 #  if all we got was 'o -j', just open today's journal
 [[ "$*" == "" ]] && [[ "$dojournal" ]] && {
     [[ $logging -gt 0 ]] && echo "Opening today's journal: ${notefile}"
     gojournal ${file_lines} && exit
 }
 
-[[ "$*" == "" ]] || [[ "${dojournal}" ]] && [[ ${task} -eq 0 ]] && cat -n "${tasks}" | column -t --separator $'\n' && exit
+[[ "$*" == "" ]] || [[ "${dojournal}" ]] && [[ "${task}" == 0 || ! "${task}" =~ ^[0-9]+$ ]] && cat -n "${tasks}" | column -t --separator $'\n' && exit
 
 # Fix some shell quoting issues
-[[ ! "$*" == "" ]] && quoted=${*//\'/\\\'} || quoted=$(get_task ${task} )
+if [[ ! "$*" == "" ]]; then
+    quoted=${*//\'/\\\'}
+elif [[ "${task}" =~ ^[0-9]+$ ]]; then
+    quoted=$(get_task "${task}")
+else
+    quoted=""
+fi
 quoted=${quoted//\"/\\\"}
 quoted=" $li ==$(date +"%H:%M:%S")== ${separator}  ${quoted}"
 [[ $logging -gt 1 ]] && echo "$quoted"
@@ -171,6 +316,8 @@ quoted=" $li ==$(date +"%H:%M:%S")== ${separator}  ${quoted}"
 # If today's journal doesn't exist, make it
 # (should never run.  Journals are pre-made to 2026
 [[ -f "${notefile}" ]] || newjournal -d $(today)
+refresh_journal_layout
+(( div_plus4=divider+4 ))
 
 # Add a section if it doesn't exist.
 [[ "${section_start}" == "" ]] && {

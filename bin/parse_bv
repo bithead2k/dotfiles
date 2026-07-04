@@ -2024,6 +2024,9 @@ def main():
 
         person_path.parent.mkdir(parents=True, exist_ok=True)
         person_path.write_text(render_frontmatter(merged, order) + "\n" + new_body.lstrip("\n"), encoding="utf-8")
+        alias_helper = Path.home() / "bin" / "obsidian_ensure_filename_alias"
+        if alias_helper.is_file():
+            subprocess.run([str(alias_helper), str(person_path)], check=False)
         print(f"Updated: {person_path}")
     finally:
         # Clean up report tabs that BeenVerified opened during this run.

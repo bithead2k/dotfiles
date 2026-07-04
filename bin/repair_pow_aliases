@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+"""Normalize aliases (and fix linkedin) on pg_pow people notes after bulk metadata refresh."""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+OBSIDIAN = Path(__import__("os").environ.get("OBSIDIAN", Path.home() / "Documents/notes"))
+PEOPLE_DIR = OBSIDIAN / "people"
+
+
+def parse_frontmatter(text: str):
+    m = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
+    if not m:
+        return {}, [], text
+    fm_text = m.group(1)
+    body = text[m.end() :]
+    data: dict[str, str] = {}
+    order: list[str] = []
+    current_key = None
+    for line in fm_text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith((" ", "\t")) and current_key:
+            data[current_key] = (data.get(current_key, "") + "\n" + line.rstrip()).strip("\n")
+            continue
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        data[key] = value.strip()
+        order.append(key)
+        current_key = key
+    return data, order, body
+
+
+def parse_alias_items(raw: str) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+
+    def add(item: str) -> None:
+        item = re.sub(r"\s+", " ", (item or "").strip())
+        if not item:
+            return
+        key = item.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        items.append(item)
+
+    if not raw:
+        return items
+
+    text = raw.strip()
+
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("- "):
+            chunk = s[2:].strip()
+            if chunk.count(" - ") >= 1:
+                for part in chunk.split(" - "):
+                    add(part.strip())
+            else:
+                add(chunk)
+        elif s and not s.endswith(":"):
+            if s.count(" - ") >= 1:
+                for part in s.split(" - "):
+                    add(part.strip())
+            else:
+                add(s)
+
+    return items
+
+
+def full_name(data: dict) -> str:
+    first = (data.get("first_name") or "").strip()
+    last = (data.get("last_name") or "").strip()
+    return re.sub(r"\s+", " ", f"{first} {last}").strip()
+
+
+def build_aliases(data: dict, basename: str) -> list[str]:
+    items = parse_alias_items(data.get("aliases", ""))
+    for candidate in (basename, full_name(data)):
+        if not candidate:
+            continue
+        if not any(i.casefold() == candidate.casefold() for i in items):
+            items.append(candidate)
+    return items
+
+
+def aliases_block(items: list[str]) -> str:
+    if not items:
+        return "aliases: "
+    return "aliases:\n" + "\n".join(f"  - {item}" for item in items)
+
+
+def aliases_format_ok(fm_text: str, items: list[str]) -> bool:
+    if not items:
+        return "aliases:" not in fm_text
+    expected = aliases_block(items)
+    m = re.search(r"^aliases:.*?(?=\n[A-Za-z_][A-Za-z0-9_]*:|\Z)", fm_text, re.M | re.S)
+    if not m:
+        return False
+    got = m.group(0).strip()
+    return got == expected.strip()
+
+
+def fix_linkedin(value: str) -> str:
+    value = (value or "").strip()
+    m = re.match(r"^(https?://\S+?)\s+-\s+.+$", value)
+    return m.group(1) if m else value
+
+
+def render_frontmatter(data: dict, order: list[str], alias_items: list[str]) -> str:
+    seen = set()
+    lines = ["---"]
+
+    for key in order:
+        if key in seen:
+            continue
+        if key == "aliases":
+            lines.append(aliases_block(alias_items))
+            seen.add(key)
+            continue
+        if key not in data:
+            continue
+        if "\n" in (data.get(key) or ""):
+            lines.append(f"{key}:")
+            lines.extend(data[key].splitlines())
+        elif data.get(key, ""):
+            lines.append(f"{key}: {data[key]}")
+        else:
+            lines.append(f"{key}: ")
+        seen.add(key)
+
+    for key, value in data.items():
+        if key in seen:
+            continue
+        if key == "aliases":
+            lines.append(aliases_block(alias_items))
+        elif "\n" in (value or ""):
+            lines.append(f"{key}:")
+            lines.extend(value.splitlines())
+        elif value:
+            lines.append(f"{key}: {value}")
+        else:
+            lines.append(f"{key}: ")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def repair_file(path: Path, *, apply: bool) -> tuple[bool, str]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if not re.search(r"^pg_pow:\s*true\s*$", text, re.M):
+        return False, "not pow"
+
+    data, order, body = parse_frontmatter(text)
+    basename = path.stem
+    alias_items = build_aliases(data, basename)
+    fm_text = text.split("---")[1] if text.startswith("---") else ""
+
+    reasons: list[str] = []
+    if not aliases_format_ok(fm_text, alias_items):
+        reasons.append("aliases")
+
+    new_linkedin = fix_linkedin(data.get("linkedin", ""))
+    if new_linkedin != (data.get("linkedin") or "").strip():
+        reasons.append("linkedin")
+        data["linkedin"] = new_linkedin
+
+    if not reasons:
+        return False, "ok"
+
+    if "aliases" not in order:
+        if "date" in order:
+            order.insert(order.index("date") + 1, "aliases")
+        elif "pow_indexed" in order:
+            order.insert(order.index("pow_indexed"), "aliases")
+        else:
+            order.append("aliases")
+
+    if apply:
+        path.write_text(render_frontmatter(data, order, alias_items) + body.lstrip("\n"), encoding="utf-8")
+
+    return True, ", ".join(reasons)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--apply", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    args = ap.parse_args()
+
+    fixed = ok = 0
+    for path in sorted(PEOPLE_DIR.glob("*.md")):
+        changed, msg = repair_file(path, apply=args.apply)
+        if changed:
+            fixed += 1
+            print(f"{'>' if args.apply else '+'} {path.name}: {msg}")
+        elif args.verbose:
+            if msg == "ok":
+                ok += 1
+
+    print(f"\nSummary: {fixed} repaired, {ok} already ok")
+    if not args.apply and fixed:
+        print("Re-run with --apply to write.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

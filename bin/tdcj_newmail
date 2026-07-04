@@ -105,6 +105,8 @@ Source: Securus Emessaging
 $body
 EOF
 
+obsidian_ensure_filename_alias "$file"
+
 #printf 'Created: %s\n' "$file"
 
 echo -e "\n[[Letter-${slug}-${letter_date}]]" >> "$person_file" || { echo "File: $person_file not found."; exit 1; }

@@ -93,6 +93,8 @@ cat > ./invoice.json <<-EOF
 }
 EOF
 
-j2 -f json "${vault}templates/invoice.md" ./invoice.json  > "${vault}invoices/${issued}_${business// /_}_${invoiceid}.md"
+invoice_md="${vault}invoices/${issued}_${business// /_}_${invoiceid}.md"
+j2 -f json "${vault}templates/invoice.md" ./invoice.json  > "${invoice_md}"
+obsidian_ensure_filename_alias "${invoice_md}"
 
 [[ -f "./invoice.json" ]] && rm ./invoice.json
